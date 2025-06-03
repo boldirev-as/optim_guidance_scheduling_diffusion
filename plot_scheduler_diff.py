@@ -31,4 +31,6 @@ plt.ylim(25, 37)
 plt.ylabel('FID')
 plt.xlabel('CLIP-Score')
 plt.legend()
-plt.show()
+# plt.show()
+
+plt.savefig('plots/scheduler_diff.png', bbox_inches='tight', dpi=300)
