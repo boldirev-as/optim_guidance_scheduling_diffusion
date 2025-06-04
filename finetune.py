@@ -51,7 +51,7 @@ from omegaconf import OmegaConf, DictConfig
 @dataclass
 class TrainConfig:
     # --- core ---
-    grad_scale: float = 1e-3
+    grad_scale: float = 1
     input_perturbation: float = 0.0
     revision: Optional[str] = None
     non_ema_revision: Optional[str] = None
@@ -80,7 +80,7 @@ class TrainConfig:
     # --- training ---
     train_batch_size: int = 2
     num_train_epochs: int = 100
-    max_train_steps: Optional[int] = 100
+    max_train_steps: Optional[int] = 10000
     gradient_accumulation_steps: int = 8
     gradient_checkpointing: bool = True
     base_lr: float = 5e-5
@@ -110,7 +110,7 @@ class TrainConfig:
     local_rank: int = -1
 
     # --- checkpointing ---
-    checkpointing_steps: int = 100
+    checkpointing_steps: int = 1000
     checkpoints_total_limit: Optional[int] = None
     resume_from_checkpoint: Optional[str] = None
 
@@ -123,7 +123,7 @@ class TrainConfig:
     tracker_project_name: str = "text2image-refl"
 
     # --- dataloader ---
-    dataloader_num_workers: int = 0
+    dataloader_num_workers: int = 8
 
     mixed_precision: str = "fp16"
 
@@ -254,13 +254,11 @@ class Trainer:
         self.unet = UNet2DConditionModel.from_pretrained(
             pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
         ).to(self.device)
-        self.reward_model = RM.load("ImageReward-v1.0", device='cpu')  # stays fp32
 
-        self.hps_model = HPSv2().to('cpu')
-
+        self.reward_model = RM.load("ImageReward-v1.0", device=device).half()
+        self.hps_model = HPSv2().to(self.device, dtype=torch.float16)
         self.hps_model.requires_grad_(False)
 
-        # freeze non‑trainable
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
         self.reward_model.requires_grad_(False)
@@ -337,15 +335,11 @@ class Trainer:
         self.lr_scheduler = get_scheduler(
             args.lr_scheduler,
             optimizer=self.optimizer,
-            num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
-            num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
+            num_warmup_steps=args.lr_warmup_steps,
+            num_training_steps=args.max_train_steps,
         )
 
-        # dtype casting for inference‑only modules
-        self.weight_dtype = torch.float32
-        self.text_encoder.to(device, dtype=self.weight_dtype)
-        self.vae.to(device, dtype=self.weight_dtype)
-        # reward_model left in fp32
+        self.weight_dtype = torch.float16
 
     # ------------------------------------------------------------------
     # training loop
@@ -393,14 +387,16 @@ class Trainer:
                 mid_timestep = random.randint(30, 39)
 
                 for t in self.noise_scheduler.timesteps[:mid_timestep]:
-                    with torch.no_grad():
-                        latent_in = self.noise_scheduler.scale_model_input(latents, t)
-                        noise_pred = self.unet(latent_in, t, encoder_hidden_states=encoder_hidden_states).sample
-                        latents = self.noise_scheduler.step(noise_pred, t, latents).prev_sample
+                    with torch.cuda.amp.autocast(dtype=self.weight_dtype):
+                        with torch.no_grad():
+                            latent_in = self.noise_scheduler.scale_model_input(latents, t)
+                            noise_pred = self.unet(latent_in, t, encoder_hidden_states=encoder_hidden_states).sample
+                            latents = self.noise_scheduler.step(noise_pred, t, latents).prev_sample
 
                 t_mid = self.noise_scheduler.timesteps[mid_timestep]
                 latent_in = self.noise_scheduler.scale_model_input(latents, t_mid)
-                noise_pred = self.unet(latent_in, t_mid, encoder_hidden_states=encoder_hidden_states).sample
+                with torch.cuda.amp.autocast(dtype=self.weight_dtype):
+                    noise_pred = self.unet(latent_in, t_mid, encoder_hidden_states=encoder_hidden_states).sample
                 pred_original = self.noise_scheduler.step(noise_pred, t_mid, latents).pred_original_sample
                 pred_original = pred_original.to(self.weight_dtype) / self.vae.config.scaling_factor
 
@@ -408,40 +404,44 @@ class Trainer:
                     images = self.vae.decode(pred_original).sample.half()
 
                 images = (images / 2 + 0.5).clamp(0, 1)
-                images = images.float()
-                images = rm_preprocess(images).to('cpu')
+                images = rm_preprocess(images).to(self.device, non_blocking=True, dtype=torch.float16)
 
                 rewards = self.reward_model.score_gard(
-                    batch["rm_input_ids"].to('cpu'),
-                    batch["rm_attention_mask"].to('cpu'),
+                    batch["rm_input_ids"].to(self.device, non_blocking=True),
+                    batch["rm_attention_mask"].to(self.device, non_blocking=True),
                     images,
-                )
-
-                hps_scores = torch.tensor(
-                    self.hps_model.score(images, batch["caption"]),
-                    device=self.device,
                 )
 
                 loss = F.relu(-rewards + 2).mean() * args.grad_scale
 
-                avg_reward = rewards.mean().item()
-                avg_hps = hps_scores.mean().item()
-                logger.info(
-                    f"[epoch {epoch + 1} | step {global_step} / {args.max_train_steps}] "
-                    f"reward = {avg_reward:.4f}, loss = {loss.item():.4f}  "
-                    f"HPS = {avg_hps:+.3f}  "
-                )
-
+                loss = loss / args.gradient_accumulation_steps
                 loss.backward()
-                self.optimizer.step()
-                self.lr_scheduler.step()
-                self.optimizer.zero_grad(set_to_none=True)
 
-                global_step += 1
-            #     if global_step >= args.max_train_steps:
-            #         break
-            # if global_step >= args.max_train_steps:
-            #     break
+                if (step + 1) % args.gradient_accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(self.unet.parameters(), args.max_grad_norm)
+                    self.optimizer.step()
+                    self.lr_scheduler.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    global_step += 1
+
+                if (global_step + 1) % args.checkpointing_steps == 0:
+                    hps_scores = torch.tensor(
+                        self.hps_model.score(images, batch["caption"]),
+                        device=self.device,
+                    )
+
+                    avg_reward = rewards.mean().item()
+                    avg_hps = hps_scores.mean().item()
+                    logger.info(
+                        f"[epoch {epoch + 1} | step {global_step} / {args.max_train_steps}] "
+                        f"reward = {avg_reward:.4f}, loss = {loss.item():.4f}  "
+                        f"HPS = {avg_hps:+.3f}  "
+                    )
+
+                if global_step >= args.max_train_steps:
+                    break
+            if global_step >= args.max_train_steps:
+                break
 
         # save final model
         if args.use_ema:
