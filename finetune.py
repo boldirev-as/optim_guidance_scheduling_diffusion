@@ -110,7 +110,7 @@ class TrainConfig:
     local_rank: int = -1
 
     # --- checkpointing ---
-    checkpointing_steps: int = 1000
+    checkpointing_steps: int = 100
     checkpoints_total_limit: Optional[int] = None
     resume_from_checkpoint: Optional[str] = None
 
@@ -255,7 +255,7 @@ class Trainer:
             pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
         ).to(self.device)
 
-        self.reward_model = RM.load("ImageReward-v1.0", device=device).half()
+        self.reward_model = RM.load("ImageReward-v1.0", device=device)
         self.hps_model = HPSv2().to(self.device, dtype=torch.float16)
         self.hps_model.requires_grad_(False)
 
@@ -409,7 +409,7 @@ class Trainer:
                 rewards = self.reward_model.score_gard(
                     batch["rm_input_ids"].to(self.device, non_blocking=True),
                     batch["rm_attention_mask"].to(self.device, non_blocking=True),
-                    images,
+                    images.to(self.device, non_blocking=True, dtype=torch.float32),
                 )
 
                 loss = F.relu(-rewards + 2).mean() * args.grad_scale
@@ -417,14 +417,7 @@ class Trainer:
                 loss = loss / args.gradient_accumulation_steps
                 loss.backward()
 
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(self.unet.parameters(), args.max_grad_norm)
-                    self.optimizer.step()
-                    self.lr_scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
-                    global_step += 1
-
-                if (global_step + 1) % args.checkpointing_steps == 0:
+                if (step + 1) % args.checkpointing_steps == 0:
                     hps_scores = torch.tensor(
                         self.hps_model.score(images, batch["caption"]),
                         device=self.device,
@@ -437,6 +430,13 @@ class Trainer:
                         f"reward = {avg_reward:.4f}, loss = {loss.item():.4f}  "
                         f"HPS = {avg_hps:+.3f}  "
                     )
+
+                if (step + 1) % args.gradient_accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(self.unet.parameters(), args.max_grad_norm)
+                    self.optimizer.step()
+                    self.lr_scheduler.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    global_step += 1
 
                 if global_step >= args.max_train_steps:
                     break
