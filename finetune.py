@@ -78,12 +78,12 @@ class TrainConfig:
     random_flip: bool = False
 
     # --- training ---
-    train_batch_size: int = 1
+    train_batch_size: int = 2
     num_train_epochs: int = 100
     max_train_steps: Optional[int] = 10000
     gradient_accumulation_steps: int = 4
     gradient_checkpointing: bool = True
-    base_lr: float = 1e-5
+    base_lr: float = 2.5e-6
     learning_rate: float = base_lr * train_batch_size * gradient_accumulation_steps
     scale_lr: bool = False
     lr_scheduler: str = "cosine"
@@ -307,7 +307,7 @@ class Trainer:
         self.train_dataloader = DataLoader(
             self.train_dataset,
             batch_size=args.train_batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=args.dataloader_num_workers,
             collate_fn=collate_fn,
         )
@@ -370,6 +370,12 @@ class Trainer:
         for epoch in range(args.num_train_epochs):
             self.unet.train()
             self.noise_scheduler.set_timesteps(40, device=self.accelerator.device)
+
+            running_reward = 0.0
+            running_hps = 0.0
+            accum_count = 0
+            running_loss = 0.0
+
             for step, batch in enumerate(self.train_dataloader):
                 batch_size = batch["input_ids"].shape[0]
 
@@ -400,13 +406,12 @@ class Trainer:
 
                     images = (images / 2 + 0.5).clamp(0, 1)
                     images = rm_preprocess(images).to(self.accelerator.device)
-
-                    images.requires_grad_(True)
+                    images = images.detach().requires_grad_(True)
 
                     rewards = self.reward_model.score_gard(
                         batch["rm_input_ids"].to(self.accelerator.device),
                         batch["rm_attention_mask"].to(self.accelerator.device),
-                        images.requires_grad_(True),
+                        images,
                     )
 
                     hps_scores = torch.tensor(
@@ -414,8 +419,12 @@ class Trainer:
                         device=self.accelerator.device,
                     )
 
-                    advantage = rewards - rewards.detach().mean()
-                    loss = -(advantage).mean()
+                    loss = -rewards.mean()
+
+                    running_reward += rewards.detach().mean()
+                    running_hps += hps_scores.detach().mean()
+                    running_loss += loss.detach().mean()
+                    accum_count += 1
 
                     self.accelerator.backward(loss)
                     if self.accelerator.sync_gradients:
@@ -426,15 +435,25 @@ class Trainer:
 
                 if self.accelerator.sync_gradients:
 
-                    avg_reward = self.accelerator.gather(rewards).mean().item()
-                    avg_hps = self.accelerator.gather(hps_scores).mean().item()
+                    mean_reward = running_reward / accum_count
+                    mean_hps = running_hps / accum_count
+                    mean_loss = running_loss / accum_count
+
+                    mean_reward = self.accelerator.gather(mean_reward).mean().item()
+                    mean_hps = self.accelerator.gather(mean_hps).mean().item()
+                    mean_loss = self.accelerator.gather(mean_loss).mean().item()
 
                     if self.accelerator.is_main_process:
                         logger.info(
                             f"[epoch {epoch + 1} | step {global_step} / {args.max_train_steps}] "
-                            f"reward = {avg_reward:.4f}, loss = {loss.item():.4f}  "
-                            f"HPS = {avg_hps:.3f}  "
+                            f"reward = {mean_reward:.4f}, loss = {mean_loss:.4f}  "
+                            f"HPS = {mean_hps:.3f}  "
                         )
+
+                    running_reward = 0.0
+                    running_hps = 0.0
+                    accum_count = 0
+                    running_loss = 0.0
 
                     global_step += 1
 
