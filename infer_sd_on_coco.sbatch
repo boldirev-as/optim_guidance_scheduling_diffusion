@@ -1,6 +1,6 @@
 #! /bin/bash
 #SBATCH --job-name="test_different_diffusion_guidances"
-#SBATCH --gpus=1
+#SBATCH --gpus=2
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --time=24:00:00
@@ -16,4 +16,5 @@ module load gnu10/10.1
 
 conda activate my_diffusers_new
 
-python /home/alseboldyrev/GuidanceScheduling_diffusers/finetune.py
+accelerate config default
+accelerate launch --multi_gpu --num_processes 2 /home/alseboldyrev/GuidanceScheduling_diffusers/finetune.py

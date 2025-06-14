@@ -1,25 +1,25 @@
-import argparse
 import logging
 import math
 import os
 import platform
 import random
-import sys
 
-from dataclasses import dataclass
-from typing import List, Dict, Any
+import diffusers
 
+from typing import Dict, Any
+
+import transformers
+from accelerate import Accelerator
 from imscore.hps.model import HPSv2
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from accelerate.utils import set_seed
+from accelerate.utils import set_seed, ProjectConfiguration
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from torch.utils.data import Dataset, DataLoader
-from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers import (
     AutoencoderKL,
@@ -28,9 +28,7 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.optimization import get_scheduler
-from diffusers.training_utils import EMAModel
 from diffusers.utils.import_utils import is_xformers_available
-from PIL import Image
 import ImageReward as RM
 
 BICUBIC = InterpolationMode.BICUBIC
@@ -47,7 +45,9 @@ from typing import List, Optional
 from omegaconf import OmegaConf, DictConfig
 
 
-# 1) Structured schema (optional but catches typos & gives help)
+# -----------------------------------------------------------------------------
+# 1) Structured schema (unchanged)
+# -----------------------------------------------------------------------------
 @dataclass
 class TrainConfig:
     # --- core ---
@@ -78,27 +78,25 @@ class TrainConfig:
     random_flip: bool = False
 
     # --- training ---
-    train_batch_size: int = 2
+    train_batch_size: int = 1
     num_train_epochs: int = 100
     max_train_steps: Optional[int] = 10000
-    gradient_accumulation_steps: int = 8
+    gradient_accumulation_steps: int = 4
     gradient_checkpointing: bool = True
-    base_lr: float = 5e-5
+    base_lr: float = 1e-5
     learning_rate: float = base_lr * train_batch_size * gradient_accumulation_steps
     scale_lr: bool = False
-    lr_scheduler: str = "constant"
-    lr_warmup_steps: int = 0
+    lr_scheduler: str = "cosine"
+    lr_warmup_steps: int = 500
     snr_gamma: Optional[float] = None
     use_8bit_adam: bool = False
-    allow_tf32: bool = False
-    use_ema: bool = False
 
     # --- optimiser ---
     adam_beta1: float = 0.9
     adam_beta2: float = 0.999
     adam_weight_decay: float = 1e-2
     adam_epsilon: float = 1e-8
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.5
 
     # --- misc/hub ---
     push_to_hub: bool = False
@@ -125,36 +123,30 @@ class TrainConfig:
     # --- dataloader ---
     dataloader_num_workers: int = 8
 
-    mixed_precision: str = "fp16"
 
+# -----------------------------------------------------------------------------
+# 2) Helper replacing `parse_args` (unchanged apart from local_rank env)
+# -----------------------------------------------------------------------------
 
-# 2) Helper replacing `parse_args`
 def get_cfg() -> DictConfig:
     """Merge defaults, YAML file (if any) and CLI overrides."""
-    # defaults from the dataclass
     cfg = OmegaConf.structured(TrainConfig)
 
-    # optional YAML file:  python script.py --config=my_cfg.yaml
     cli = OmegaConf.from_cli()
     if "config" in cli:
         yaml_cfg = OmegaConf.load(cli.pop("config"))
         cfg = OmegaConf.merge(cfg, yaml_cfg)
 
-    # finally apply direct CLI overrides
     cfg = OmegaConf.merge(cfg, cli)
 
-    # keep `non_ema_revision` in sync
-    if cfg.non_ema_revision is None:
-        cfg.non_ema_revision = cfg.revision
-
-    # local-rank env override
-    env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != cfg.local_rank:
-        cfg.local_rank = env_local_rank
+    cfg.non_ema_revision = cfg.revision
 
     return cfg
 
 
+# -----------------------------------------------------------------------------
+# Datasets & Collate (unchanged)
+# -----------------------------------------------------------------------------
 class ParquetPromptDataset(Dataset):
     """Reads a Parquet file with a `prompt` column and performs on‑the‑fly tokenisation."""
 
@@ -210,7 +202,7 @@ class ParquetPromptDataset(Dataset):
             "input_ids": txt_enc.input_ids.squeeze(0),  # (77,)
             "rm_input_ids": rm_enc.input_ids.squeeze(0),  # (35,)
             "rm_attention_mask": rm_enc.attention_mask.squeeze(0),
-            "caption": caption
+            "caption": caption,
         }
 
 
@@ -218,45 +210,55 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     out = {}
     for k in batch[0]:
         if k == "caption":
-            out[k] = [b[k] for b in batch]  # list of str
+            out[k] = [b[k] for b in batch]
         else:
             out[k] = torch.stack([b[k] for b in batch])
     return out
 
 
-# ---------------------------------------------
-#  Trainer
-# ---------------------------------------------
 class Trainer:
-    def __init__(self, pretrained_model_name_or_path: str, train_parquet: str, args, device: str):
-        self.device = device
+    def __init__(self, pretrained_model_name_or_path: str, train_parquet: str, args):
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.args = args
-        self.dtype = torch.float16
+        self.weight_dtype = torch.float32
+
+        accelerator_project_config = ProjectConfiguration(total_limit=args.checkpoints_total_limit)
+
+        self.accelerator = Accelerator(
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            log_with=args.report_to,
+            project_config=accelerator_project_config
+        )
 
         if args.seed is not None:
             set_seed(args.seed)
+            self.accelerator.state.initialize_random_seed(args.seed)
+
+        if args.logging_dir is not None:
+            os.makedirs(args.logging_dir, exist_ok=True)
+
+        logger.info(self.accelerator.state)
 
         # sched / tokeniser / models
         self.noise_scheduler = DDPMScheduler.from_pretrained(
             pretrained_model_name_or_path, subfolder="scheduler"
         )
         self.tokenizer = CLIPTokenizer.from_pretrained(
-            pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, device=self.device,
-            dtype=self.dtype
+            pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
         )
         self.text_encoder = CLIPTextModel.from_pretrained(
             pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
-        ).half().to(self.device)
+        )
         self.vae = AutoencoderKL.from_pretrained(
             pretrained_model_name_or_path, subfolder="vae", revision=args.revision,
-        ).half().to(self.device)
+        )
         self.unet = UNet2DConditionModel.from_pretrained(
             pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
-        ).to(self.device)
+        )
 
-        self.reward_model = RM.load("ImageReward-v1.0", device=device)
-        self.hps_model = HPSv2().to(self.device, dtype=torch.float16)
+        self.reward_model = RM.load("ImageReward-v1.0")
+        self.reward_model.eval()
+        self.hps_model = HPSv2()
         self.hps_model.requires_grad_(False)
 
         self.vae.requires_grad_(False)
@@ -268,16 +270,6 @@ class Trainer:
             sum(p.numel() for p in self.unet.parameters() if p.requires_grad),
         )
 
-        # EMA (optional)
-        if args.use_ema:
-            self.ema_unet = EMAModel(
-                UNet2DConditionModel.from_pretrained(
-                    pretrained_model_name_or_path, subfolder="unet", revision=args.revision
-                ).parameters(),
-                model_cls=UNet2DConditionModel,
-                model_config=self.unet.config,
-            )
-
         # memory‑efficient attention
         if args.enable_xformers_memory_efficient_attention:
             if is_xformers_available():
@@ -287,9 +279,6 @@ class Trainer:
 
         if args.gradient_checkpointing:
             self.unet.enable_gradient_checkpointing()
-
-        if args.allow_tf32 and torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = True
 
         if args.scale_lr:
             args.learning_rate *= args.gradient_accumulation_steps * args.train_batch_size
@@ -312,13 +301,13 @@ class Trainer:
             train_mode=True,
             seed=args.seed or 42,
         )
-        if args.max_train_samples:
+        if args.max_train_samples and self.accelerator.is_main_process:
             self.train_dataset.df = self.train_dataset.df.sample(args.max_train_samples, random_state=args.seed)
 
         self.train_dataloader = DataLoader(
             self.train_dataset,
             batch_size=args.train_batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=args.dataloader_num_workers,
             collate_fn=collate_fn,
         )
@@ -339,14 +328,21 @@ class Trainer:
             num_training_steps=args.max_train_steps,
         )
 
-        self.weight_dtype = torch.float16
+        self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
+            self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler
+        )
+
+        self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.reward_model.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.hps_model.to(self.accelerator.device, dtype=self.weight_dtype)
 
     # ------------------------------------------------------------------
     # training loop
     # ------------------------------------------------------------------
     def train(self):
         args = self.args
-        total_batch_size = args.train_batch_size * args.gradient_accumulation_steps
+        total_batch_size = args.train_batch_size * args.gradient_accumulation_steps * self.accelerator.num_processes
 
         logger.info("***** Running training *****")
         logger.info("Num examples           = %d", len(self.train_dataset))
@@ -355,6 +351,7 @@ class Trainer:
         logger.info("Total batch size       = %d", total_batch_size)
         logger.info("Gradient accum steps   = %d", args.gradient_accumulation_steps)
         logger.info("Total optimisation steps = %d", args.max_train_steps)
+        logger.info("Num processes          = %f", self.accelerator.num_processes)
 
         # progress_bar = tqdm(range(args.max_train_steps), desc="steps")
         global_step = 0
@@ -372,70 +369,73 @@ class Trainer:
 
         for epoch in range(args.num_train_epochs):
             self.unet.train()
+            self.noise_scheduler.set_timesteps(40, device=self.accelerator.device)
             for step, batch in enumerate(self.train_dataloader):
                 batch_size = batch["input_ids"].shape[0]
 
-                # text embeddings
-                with torch.cuda.amp.autocast(dtype=self.weight_dtype):
-                    encoder_hidden_states = self.text_encoder(batch["input_ids"].to(self.device))[0]
+                with self.accelerator.accumulate(self.unet):
 
-                # random latents
-                latents = torch.randn((batch_size, 4, 64, 64), device=self.device, dtype=self.weight_dtype)
+                    encoder_hidden_states = self.text_encoder(batch["input_ids"].to(self.accelerator.device))[0]
 
-                # diffusion steps
-                self.noise_scheduler.set_timesteps(40, device=self.device)
-                mid_timestep = random.randint(30, 39)
+                    # random latents
+                    latents = torch.randn((batch_size, 4, 64, 64), device=self.accelerator.device,
+                                          dtype=self.weight_dtype)
 
-                for t in self.noise_scheduler.timesteps[:mid_timestep]:
-                    with torch.cuda.amp.autocast(dtype=self.weight_dtype):
+                    mid_timestep = random.randint(30, 39)
+
+                    for t in self.noise_scheduler.timesteps[:mid_timestep]:
                         with torch.no_grad():
                             latent_in = self.noise_scheduler.scale_model_input(latents, t)
                             noise_pred = self.unet(latent_in, t, encoder_hidden_states=encoder_hidden_states).sample
                             latents = self.noise_scheduler.step(noise_pred, t, latents).prev_sample
 
-                t_mid = self.noise_scheduler.timesteps[mid_timestep]
-                latent_in = self.noise_scheduler.scale_model_input(latents, t_mid)
-                with torch.cuda.amp.autocast(dtype=self.weight_dtype):
+                    t_mid = self.noise_scheduler.timesteps[mid_timestep]
+                    latent_in = self.noise_scheduler.scale_model_input(latents, t_mid)
+
                     noise_pred = self.unet(latent_in, t_mid, encoder_hidden_states=encoder_hidden_states).sample
-                pred_original = self.noise_scheduler.step(noise_pred, t_mid, latents).pred_original_sample
-                pred_original = pred_original.to(self.weight_dtype) / self.vae.config.scaling_factor
+                    pred_original = self.noise_scheduler.step(noise_pred, t_mid, latents).pred_original_sample
+                    pred_original = pred_original.float() / self.vae.config.scaling_factor
 
-                with torch.cuda.amp.autocast(dtype=torch.float16):
-                    images = self.vae.decode(pred_original).sample.half()
+                    images = self.vae.decode(pred_original).sample
 
-                images = (images / 2 + 0.5).clamp(0, 1)
-                images = rm_preprocess(images).to(self.device, non_blocking=True, dtype=torch.float16)
+                    images = (images / 2 + 0.5).clamp(0, 1)
+                    images = rm_preprocess(images).to(self.accelerator.device)
 
-                rewards = self.reward_model.score_gard(
-                    batch["rm_input_ids"].to(self.device, non_blocking=True),
-                    batch["rm_attention_mask"].to(self.device, non_blocking=True),
-                    images.to(self.device, non_blocking=True, dtype=torch.float32),
-                )
+                    images.requires_grad_(True)
 
-                loss = F.relu(-rewards + 2).mean() * args.grad_scale
+                    rewards = self.reward_model.score_gard(
+                        batch["rm_input_ids"].to(self.accelerator.device),
+                        batch["rm_attention_mask"].to(self.accelerator.device),
+                        images.requires_grad_(True),
+                    )
 
-                loss = loss / args.gradient_accumulation_steps
-                loss.backward()
-
-                if (step + 1) % args.checkpointing_steps == 0:
                     hps_scores = torch.tensor(
-                        self.hps_model.score(images, batch["caption"]),
-                        device=self.device,
+                        self.hps_model.score(images.to(self.accelerator.device), batch["caption"]),
+                        device=self.accelerator.device,
                     )
 
-                    avg_reward = rewards.mean().item()
-                    avg_hps = hps_scores.mean().item()
-                    logger.info(
-                        f"[epoch {epoch + 1} | step {global_step} / {args.max_train_steps}] "
-                        f"reward = {avg_reward:.4f}, loss = {loss.item():.4f}  "
-                        f"HPS = {avg_hps:+.3f}  "
-                    )
+                    advantage = rewards - rewards.detach().mean()
+                    loss = -(advantage).mean()
 
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(self.unet.parameters(), args.max_grad_norm)
+                    self.accelerator.backward(loss)
+                    if self.accelerator.sync_gradients:
+                        self.accelerator.clip_grad_norm_(self.unet.parameters(), args.max_grad_norm)
                     self.optimizer.step()
                     self.lr_scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
+                    self.optimizer.zero_grad()
+
+                if self.accelerator.sync_gradients:
+
+                    avg_reward = self.accelerator.gather(rewards).mean().item()
+                    avg_hps = self.accelerator.gather(hps_scores).mean().item()
+
+                    if self.accelerator.is_main_process:
+                        logger.info(
+                            f"[epoch {epoch + 1} | step {global_step} / {args.max_train_steps}] "
+                            f"reward = {avg_reward:.4f}, loss = {loss.item():.4f}  "
+                            f"HPS = {avg_hps:.3f}  "
+                        )
+
                     global_step += 1
 
                 if global_step >= args.max_train_steps:
@@ -443,9 +443,9 @@ class Trainer:
             if global_step >= args.max_train_steps:
                 break
 
-        # save final model
-        if args.use_ema:
-            self.ema_unet.copy_to(self.unet.parameters())
+        self.accelerator.wait_for_everyone()
+        self.accelerator.end_training()
+
         pipeline = StableDiffusionPipeline.from_pretrained(
             self.pretrained_model_name_or_path,
             text_encoder=self.text_encoder,
@@ -463,17 +463,9 @@ class Trainer:
 if __name__ == "__main__":
     args = get_cfg()
 
-    if torch.cuda.is_available():
-        device_name = "cuda"
-    elif platform.system() == "Darwin":
-        device_name = "mps"
-    else:
-        device_name = "cpu"
-
     trainer = Trainer(
         pretrained_model_name_or_path="CompVis/stable-diffusion-v1-4",
         train_parquet="pick-a-pic-v2-unique-prompts/data/train-00000-of-00001.parquet",
-        args=args,
-        device=device_name,
+        args=args
     )
     trainer.train()
