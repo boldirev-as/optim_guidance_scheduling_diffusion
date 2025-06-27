@@ -1,26 +1,21 @@
 import logging
 import math
 import os
-import platform
 import random
 
-import diffusers
+from typing import Dict
 
-from typing import Dict, Any
-
-import transformers
 from accelerate import Accelerator
+from datasets import load_dataset
 from imscore.hps.model import HPSv2
 
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
 from accelerate.utils import set_seed, ProjectConfiguration
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-from torch.utils.data import Dataset, DataLoader
-from transformers import CLIPTextModel, CLIPTokenizer
+from torch.utils.data import DataLoader
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
@@ -31,6 +26,9 @@ from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
 import ImageReward as RM
 
+from config import get_cfg
+from prompt_dataset import ParquetPromptDataset
+
 BICUBIC = InterpolationMode.BICUBIC
 
 logging.basicConfig(
@@ -40,173 +38,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("refl_trainer")
 
-from dataclasses import dataclass, field
-from typing import List, Optional
-from omegaconf import OmegaConf, DictConfig
 
-
-# -----------------------------------------------------------------------------
-# 1) Structured schema (unchanged)
-# -----------------------------------------------------------------------------
-@dataclass
-class TrainConfig:
-    # --- core ---
-    grad_scale: float = 1
-    input_perturbation: float = 0.0
-    revision: Optional[str] = None
-    non_ema_revision: Optional[str] = None
-
-    # --- data ---
-    dataset_name: Optional[str] = None
-    dataset_config_name: Optional[str] = None
-    image_column: str = "image"
-    caption_column: str = "text"
-    max_train_samples: Optional[int] = None
-    validation_prompts: List[str] = field(default_factory=list)
-
-    # --- paths & I/O ---
-    output_dir: str = "checkpoint/refl"
-    cache_dir: Optional[str] = None
-    logging_dir: str = "logs"
-
-    # --- reproducibility ---
-    seed: Optional[int] = None
-
-    # --- image preprocessing ---
-    resolution: int = 512
-    center_crop: bool = False
-    random_flip: bool = False
-
-    # --- training ---
-    train_batch_size: int = 2
-    num_train_epochs: int = 100
-    max_train_steps: Optional[int] = 10000
-    gradient_accumulation_steps: int = 4
-    gradient_checkpointing: bool = True
-    base_lr: float = 2.5e-6
-    learning_rate: float = base_lr * train_batch_size * gradient_accumulation_steps
-    scale_lr: bool = False
-    lr_scheduler: str = "cosine"
-    lr_warmup_steps: int = 500
-    snr_gamma: Optional[float] = None
-    use_8bit_adam: bool = False
-
-    # --- optimiser ---
-    adam_beta1: float = 0.9
-    adam_beta2: float = 0.999
-    adam_weight_decay: float = 1e-2
-    adam_epsilon: float = 1e-8
-    max_grad_norm: float = 0.5
-
-    # --- misc/hub ---
-    push_to_hub: bool = False
-    hub_token: Optional[str] = None
-    hub_model_id: Optional[str] = None
-    report_to: str = "tensorboard"
-
-    # --- distributed ---
-    local_rank: int = -1
-
-    # --- checkpointing ---
-    checkpointing_steps: int = 100
-    checkpoints_total_limit: Optional[int] = None
-    resume_from_checkpoint: Optional[str] = None
-
-    # --- memory/attention ---
-    enable_xformers_memory_efficient_attention: bool = True
-    noise_offset: float = 0.0
-
-    # --- validation/logging ---
-    validation_epochs: int = 5
-    tracker_project_name: str = "text2image-refl"
-
-    # --- dataloader ---
-    dataloader_num_workers: int = 8
-
-
-# -----------------------------------------------------------------------------
-# 2) Helper replacing `parse_args` (unchanged apart from local_rank env)
-# -----------------------------------------------------------------------------
-
-def get_cfg() -> DictConfig:
-    """Merge defaults, YAML file (if any) and CLI overrides."""
-    cfg = OmegaConf.structured(TrainConfig)
-
-    cli = OmegaConf.from_cli()
-    if "config" in cli:
-        yaml_cfg = OmegaConf.load(cli.pop("config"))
-        cfg = OmegaConf.merge(cfg, yaml_cfg)
-
-    cfg = OmegaConf.merge(cfg, cli)
-
-    cfg.non_ema_revision = cfg.revision
-
-    return cfg
-
-
-# -----------------------------------------------------------------------------
-# Datasets & Collate (unchanged)
-# -----------------------------------------------------------------------------
-class ParquetPromptDataset(Dataset):
-    """Reads a Parquet file with a `prompt` column and performs on‑the‑fly tokenisation."""
-
-    def __init__(
-            self,
-            parquet_path: str,
-            caption_col: str,
-            tokenizer: CLIPTokenizer,
-            rm_tokenizer: Any,
-            max_len: int = 77,
-            rm_max_len: int = 35,
-            train_mode: bool = True,
-            seed: int = 42,
-    ):
-        super().__init__()
-        self.df = pd.read_parquet(parquet_path)
-        self.caption_col = caption_col
-        self.tokenizer = tokenizer
-        self.rm_tokenizer = rm_tokenizer
-        self.max_len = max_len
-        self.rm_max_len = rm_max_len
-        self.train_mode = train_mode
-        random.seed(seed)
-
-    def __len__(self) -> int:
-        return len(self.df)
-
-    def _pick_caption(self, raw_caption):
-        if isinstance(raw_caption, str):
-            return raw_caption
-        if isinstance(raw_caption, (list, tuple, np.ndarray)):
-            return random.choice(raw_caption) if self.train_mode else raw_caption[0]
-        raise ValueError("Captions must be strings or lists of strings.")
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        caption = self._pick_caption(self.df.iloc[idx][self.caption_col])
-
-        txt_enc = self.tokenizer(
-            caption,
-            padding="max_length",
-            truncation=True,
-            max_length=self.max_len,
-            return_tensors="pt",
-        )
-        rm_enc = self.rm_tokenizer(
-            caption,
-            padding="max_length",
-            truncation=True,
-            max_length=self.rm_max_len,
-            return_tensors="pt",
-        )
-        return {
-            "input_ids": txt_enc.input_ids.squeeze(0),  # (77,)
-            "rm_input_ids": rm_enc.input_ids.squeeze(0),  # (35,)
-            "rm_attention_mask": rm_enc.attention_mask.squeeze(0),
-            "caption": caption,
-        }
-
-
-def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+def collate_fn(batch) -> Dict[str, torch.Tensor]:
     out = {}
     for k in batch[0]:
         if k == "caption":
@@ -220,6 +53,9 @@ class Trainer:
     def __init__(self, pretrained_model_name_or_path: str, train_parquet: str, args):
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.args = args
+
+        self.ema_reward = self.args.ema_reward
+
         self.weight_dtype = torch.float32
 
         accelerator_project_config = ProjectConfiguration(total_limit=args.checkpoints_total_limit)
@@ -255,6 +91,13 @@ class Trainer:
         self.unet = UNet2DConditionModel.from_pretrained(
             pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
         )
+
+        self.clip_vision = CLIPVisionModel.from_pretrained(
+            "openai/clip-vit-large-patch14"
+        )
+        self.clip_vision.requires_grad_(False)
+        self.clip_text = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
+        self.clip_text.requires_grad_(False)
 
         self.reward_model = RM.load("ImageReward-v1.0")
         self.reward_model.eval()
@@ -312,7 +155,21 @@ class Trainer:
             collate_fn=collate_fn,
         )
 
-        # scheduler
+        self.val_dataset = ParquetPromptDataset(
+            parquet_path=self.args.validation_json,
+            tokenizer=self.tokenizer,
+            rm_tokenizer=self.reward_model.blip.tokenizer,
+            train_mode=False,
+            seed=args.seed or 42,
+        )
+        self.val_dataloader = DataLoader(
+            self.val_dataset,
+            batch_size=args.eval_batch_size,
+            shuffle=False,
+            num_workers=args.dataloader_num_workers,
+            collate_fn=collate_fn,
+        )
+
         self.num_update_steps_per_epoch = math.ceil(
             len(self.train_dataloader) / args.gradient_accumulation_steps
         )
@@ -336,6 +193,47 @@ class Trainer:
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
         self.reward_model.to(self.accelerator.device, dtype=self.weight_dtype)
         self.hps_model.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.clip_vision.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.clip_text.to(self.accelerator.device, dtype=self.weight_dtype)
+
+        self.rm_preprocess = transforms.Compose(
+            [
+                transforms.Resize(224, interpolation=BICUBIC),
+                transforms.CenterCrop(224),
+                transforms.Normalize(
+                    mean=(0.48145466, 0.4578275, 0.40821073),
+                    std=(0.26862954, 0.26130258, 0.27577711),
+                ),
+            ]
+        )
+
+        self._build_ref_stats()
+
+    def _build_ref_stats(self):
+        """Load HPDv2‑test, extract CLIP‑vision features and cache eigenvalues."""
+        logger.info("Computing reference eigenvalues for SCD/LSCD (HPDv2‑test)…")
+        ds = load_dataset("ymhao/HPDv2", split="test")
+        ref_loader = DataLoader(
+            ds,
+            batch_size=self.args.eval_batch_size,
+            num_workers=self.args.dataloader_num_workers,
+            shuffle=False,
+        )
+
+        feats = []
+        for batch in ref_loader:
+            imgs = self.rm_preprocess(batch["image"]).to(self.accelerator.device)
+            with torch.no_grad():
+                f = self.clip_vision(imgs).pooler_output  # (B, D=768)
+            feats.append(f)
+
+        feats = torch.cat(feats, dim=0)  # (N, D)
+        mu = feats.mean(dim=0)
+        # unbiased sample covariance
+        Sigma = (feats - mu).T @ (feats - mu) / (feats.size(0) - 1)
+        eigvals, _ = torch.linalg.eigh(Sigma)
+        self.ref_eig = eigvals.clamp_min_(1e-9).detach()
+        logger.info("Reference eigenvalues ready (D=%d).", eigvals.size(0))
 
     # ------------------------------------------------------------------
     # training loop
@@ -356,23 +254,11 @@ class Trainer:
         # progress_bar = tqdm(range(args.max_train_steps), desc="steps")
         global_step = 0
 
-        rm_preprocess = transforms.Compose(
-            [
-                transforms.Resize(224, interpolation=BICUBIC),
-                transforms.CenterCrop(224),
-                transforms.Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
-            ]
-        )
-
         for epoch in range(args.num_train_epochs):
             self.unet.train()
             self.noise_scheduler.set_timesteps(40, device=self.accelerator.device)
 
             running_reward = 0.0
-            running_hps = 0.0
             accum_count = 0
             running_loss = 0.0
 
@@ -405,8 +291,8 @@ class Trainer:
                     images = self.vae.decode(pred_original).sample
 
                     images = (images / 2 + 0.5).clamp(0, 1)
-                    images = rm_preprocess(images).to(self.accelerator.device)
-                    images = images.detach().requires_grad_(True)
+                    images = self.rm_preprocess(images).to(self.accelerator.device)
+                    images.requires_grad_(True)
 
                     rewards = self.reward_model.score_gard(
                         batch["rm_input_ids"].to(self.accelerator.device),
@@ -414,15 +300,10 @@ class Trainer:
                         images,
                     )
 
-                    hps_scores = torch.tensor(
-                        self.hps_model.score(images.to(self.accelerator.device), batch["caption"]),
-                        device=self.accelerator.device,
-                    )
-
-                    loss = -rewards.mean()
+                    self.ema_reward = 0.9 * self.ema_reward + 0.1 * rewards.mean().item()
+                    loss = -(rewards - self.ema_reward).mean()
 
                     running_reward += rewards.detach().mean()
-                    running_hps += hps_scores.detach().mean()
                     running_loss += loss.detach().mean()
                     accum_count += 1
 
@@ -436,29 +317,29 @@ class Trainer:
                 if self.accelerator.sync_gradients:
 
                     mean_reward = running_reward / accum_count
-                    mean_hps = running_hps / accum_count
                     mean_loss = running_loss / accum_count
 
                     mean_reward = self.accelerator.gather(mean_reward).mean().item()
-                    mean_hps = self.accelerator.gather(mean_hps).mean().item()
                     mean_loss = self.accelerator.gather(mean_loss).mean().item()
 
                     if self.accelerator.is_main_process:
                         logger.info(
                             f"[epoch {epoch + 1} | step {global_step} / {args.max_train_steps}] "
                             f"reward = {mean_reward:.4f}, loss = {mean_loss:.4f}  "
-                            f"HPS = {mean_hps:.3f}  "
                         )
 
                     running_reward = 0.0
-                    running_hps = 0.0
                     accum_count = 0
                     running_loss = 0.0
 
                     global_step += 1
 
+                    if global_step % args.evaluation_steps == 0:
+                        self._evaluate(global_step)
+
                 if global_step >= args.max_train_steps:
                     break
+
             if global_step >= args.max_train_steps:
                 break
 
@@ -475,10 +356,86 @@ class Trainer:
         pipeline.save_pretrained(args.output_dir)
         logger.info("Training complete. Model saved to %s", args.output_dir)
 
+    @torch.no_grad()
+    def _evaluate(self, global_step: int):
 
-# ---------------------------------------------
-#  CLI entry point
-# ---------------------------------------------
+        self.unet.eval()
+        self.noise_scheduler.set_timesteps(40, device=self.accelerator.device)
+
+        running_reward = 0.0
+        running_hps = 0.0
+        accum_count = 0
+        running_diversity = 0.0
+        running_clip = 0.0
+
+        gen_feats = []
+
+        for step, batch in enumerate(self.val_dataloader):
+            batch_size = batch["input_ids"].shape[0]
+
+            encoder_hidden_states = self.text_encoder(batch["input_ids"].to(self.accelerator.device))[0]
+            latents = torch.randn((batch_size, 4, 64, 64), device=self.accelerator.device,
+                                  dtype=self.weight_dtype)
+
+            for t in self.noise_scheduler.timesteps:
+                latent_in = self.noise_scheduler.scale_model_input(latents, t)
+                noise_pred = self.unet(latent_in, t, encoder_hidden_states=encoder_hidden_states).sample
+                latents = self.noise_scheduler.step(noise_pred, t, latents).prev_sample
+
+            pred_original = latents.float() / self.vae.config.scaling_factor
+            images = self.vae.decode(pred_original).sample
+            images = (images / 2 + 0.5).clamp(0, 1)
+
+            hps_scores = torch.tensor(
+                self.hps_model.score(images.to(self.accelerator.device), batch["caption"]),
+                device=self.accelerator.device,
+            )
+
+            images = self.rm_preprocess(images).to(self.accelerator.device)
+            with torch.no_grad():
+                emb = self.clip_vision(images).pooler_output  # (B, D)
+            emb_norm = F.normalize(emb, dim=-1)
+            gen_feats.append(emb)
+
+            rewards = self.reward_model.score_gard(
+                batch["rm_input_ids"].to(self.accelerator.device),
+                batch["rm_attention_mask"].to(self.accelerator.device),
+                images,
+            )
+
+            # ------------- метрика diversity -------------
+            sim = emb_norm @ emb_norm.T
+            diversity = (1 - sim).triu(1).sum() * 2 / (batch_size * (batch_size - 1))
+            txt_emb = F.normalize(
+                self.clip_text(batch["input_ids"].to(self.accelerator.device))[0][:, 0, :],
+                dim=-1,
+            )
+            clip_scores = (txt_emb * emb_norm).sum(dim=-1)
+
+            # ------------- аккумуляция -------------
+            running_diversity += diversity.item()
+            running_reward += rewards.detach().mean()
+            running_hps += hps_scores.detach().mean()
+            running_clip += clip_scores.detach().mean()
+            accum_count += 1
+
+        gen_feats = torch.cat(gen_feats, dim=0)  # (M, D)
+        mu_g = gen_feats.mean(dim=0)
+        Sigma_g = (gen_feats - mu_g).T @ (gen_feats - mu_g) / (gen_feats.size(0) - 1)
+        eig_g, _ = torch.linalg.eigh(Sigma_g)
+        eig_g = eig_g.clamp_min_(1e-9)
+
+        lscd = torch.sum((torch.log(self.ref_eig) - torch.log(eig_g)) ** 2).item()
+
+        if self.accelerator.is_main_process:
+            logger.info(
+                f"[VAL step {global_step}] reward = {running_reward / accum_count:.4f}, "
+                f"HPS = {running_hps / accum_count:.3f}, Diversity = {running_diversity / accum_count:.4f}, "
+                f"CLIP = {running_clip / accum_count:.4f}, "
+                f"LSCD = {lscd:.4f}"
+            )
+
+
 if __name__ == "__main__":
     args = get_cfg()
 
