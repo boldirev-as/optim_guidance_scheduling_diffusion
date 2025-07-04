@@ -2,11 +2,13 @@ import logging
 import math
 import os
 import random
+from functools import partial
 
 from typing import Dict
 
 from accelerate import Accelerator
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 from imscore.hps.model import HPSv2
 
 import torch
@@ -15,7 +17,7 @@ from accelerate.utils import set_seed, ProjectConfiguration
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from torch.utils.data import DataLoader
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel, CLIPModel
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
@@ -47,6 +49,12 @@ def collate_fn(batch) -> Dict[str, torch.Tensor]:
         else:
             out[k] = torch.stack([b[k] for b in batch])
     return out
+
+
+def collate_images(batch, preprocess):
+    # batch - это список dict’ов, каждый содержит ключ "image"
+    images = torch.stack([preprocess(sample["image"]) for sample in batch])
+    return {"image": images}  # можете вернуть и другие поля, если нужны
 
 
 class Trainer:
@@ -92,12 +100,8 @@ class Trainer:
             pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
         )
 
-        self.clip_vision = CLIPVisionModel.from_pretrained(
-            "openai/clip-vit-large-patch14"
-        )
-        self.clip_vision.requires_grad_(False)
-        self.clip_text = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
-        self.clip_text.requires_grad_(False)
+        self.clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
+        self.clip.requires_grad_(False)
 
         self.reward_model = RM.load("ImageReward-v1.0")
         self.reward_model.eval()
@@ -193,38 +197,52 @@ class Trainer:
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
         self.reward_model.to(self.accelerator.device, dtype=self.weight_dtype)
         self.hps_model.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.clip_vision.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.clip_text.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.clip.to(self.accelerator.device, dtype=self.weight_dtype)
 
-        self.rm_preprocess = transforms.Compose(
-            [
-                transforms.Resize(224, interpolation=BICUBIC),
-                transforms.CenterCrop(224),
-                transforms.Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
-            ]
-        )
+        self.rm_preprocess = transforms.Compose([
+            transforms.Resize(224, interpolation=BICUBIC),
+            transforms.CenterCrop(224),
+            transforms.Normalize(
+                mean=(0.48145466, 0.4578275, 0.40821073),
+                std=(0.26862954, 0.26130258, 0.27577711),
+            ),
+        ])
+
+        self.rm_preprocess_eval = transforms.Compose([
+            transforms.Lambda(lambda img: img.convert("RGB")),
+            transforms.Resize(224, interpolation=BICUBIC),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),  # <-- вот этого не хватало
+            transforms.Normalize(
+                mean=(0.48145466, 0.4578275, 0.40821073),
+                std=(0.26862954, 0.26130258, 0.27577711),
+            ),
+        ])
 
         self._build_ref_stats()
 
     def _build_ref_stats(self):
         """Load HPDv2‑test, extract CLIP‑vision features and cache eigenvalues."""
         logger.info("Computing reference eigenvalues for SCD/LSCD (HPDv2‑test)…")
-        ds = load_dataset("ymhao/HPDv2", split="test")
+        ds = load_dataset(
+            "./hpd_test.py",
+            split="test",
+            trust_remote_code=True
+        )
+
         ref_loader = DataLoader(
             ds,
             batch_size=self.args.eval_batch_size,
-            num_workers=self.args.dataloader_num_workers,
             shuffle=False,
+            num_workers=self.args.dataloader_num_workers,  # <-- тут
+            collate_fn=partial(collate_images, preprocess=self.rm_preprocess_eval)  # <-- тут
         )
 
         feats = []
         for batch in ref_loader:
-            imgs = self.rm_preprocess(batch["image"]).to(self.accelerator.device)
+            imgs = batch["image"].to(self.accelerator.device)
             with torch.no_grad():
-                f = self.clip_vision(imgs).pooler_output  # (B, D=768)
+                f = self.clip.vision_model(pixel_values=imgs).pooler_output
             feats.append(f)
 
         feats = torch.cat(feats, dim=0)  # (N, D)
@@ -392,8 +410,7 @@ class Trainer:
             )
 
             images = self.rm_preprocess(images).to(self.accelerator.device)
-            with torch.no_grad():
-                emb = self.clip_vision(images).pooler_output  # (B, D)
+            emb = self.clip.vision_model(pixel_values=images).pooler_output
             emb_norm = F.normalize(emb, dim=-1)
             gen_feats.append(emb)
 
@@ -406,11 +423,14 @@ class Trainer:
             # ------------- метрика diversity -------------
             sim = emb_norm @ emb_norm.T
             diversity = (1 - sim).triu(1).sum() * 2 / (batch_size * (batch_size - 1))
-            txt_emb = F.normalize(
-                self.clip_text(batch["input_ids"].to(self.accelerator.device))[0][:, 0, :],
-                dim=-1,
-            )
-            clip_scores = (txt_emb * emb_norm).sum(dim=-1)
+
+            # ------------- метрика clip -------------
+
+            img_feat = F.normalize(self.clip.get_image_features(pixel_values=images), dim=-1)  # (B,768)
+            text_feat = F.normalize(
+                self.clip.get_text_features(input_ids=batch["input_ids"].to(self.accelerator.device)),
+                dim=-1)  # (B,768)
+            clip_scores = (img_feat * text_feat).sum(-1)
 
             # ------------- аккумуляция -------------
             running_diversity += diversity.item()

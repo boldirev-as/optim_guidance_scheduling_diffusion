@@ -65,7 +65,7 @@ class TrainConfig:
 
     # --- checkpointing ---
     checkpointing_steps: int = 1000
-    evaluation_steps: int = 5
+    evaluation_steps: int = 200
     eval_batch_size: int = 8
     validation_json: str = "pick-a-pic-v2-unique-prompts/test.json"
     checkpoints_total_limit: Optional[int] = None
