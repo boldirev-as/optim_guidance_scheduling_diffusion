@@ -58,7 +58,9 @@ class TrainConfig:
     push_to_hub: bool = False
     hub_token: Optional[str] = None
     hub_model_id: Optional[str] = None
-    report_to: str = "tensorboard"
+    report_to: str = "wandb"
+    wandb_project: str = "text2image-refl"
+    wandb_run_name: str = "refl"
 
     # --- distributed ---
     local_rank: int = -1

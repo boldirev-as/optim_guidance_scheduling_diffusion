@@ -6,6 +6,7 @@ from functools import partial
 
 from typing import Dict
 
+import wandb
 from accelerate import Accelerator
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
@@ -116,6 +117,14 @@ class Trainer:
             "Trainable UNet params: %d",
             sum(p.numel() for p in self.unet.parameters() if p.requires_grad),
         )
+
+        if self.accelerator.is_main_process and args.report_to == "wandb":
+            import wandb
+            wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name,
+                config=vars(args),
+            )
 
         # memory‑efficient attention
         if args.enable_xformers_memory_efficient_attention:
@@ -291,7 +300,7 @@ class Trainer:
                     latents = torch.randn((batch_size, 4, 64, 64), device=self.accelerator.device,
                                           dtype=self.weight_dtype)
 
-                    mid_timestep = random.randint(30, 39)
+                    mid_timestep = random.randint(36, 39)
 
                     for t in self.noise_scheduler.timesteps[:mid_timestep]:
                         with torch.no_grad():
@@ -308,9 +317,8 @@ class Trainer:
 
                     images = self.vae.decode(pred_original).sample
 
-                    images = (images / 2 + 0.5).clamp(0, 1)
+                    images = (images / 2 + 0.5).clamp_(0, 1)
                     images = self.rm_preprocess(images).to(self.accelerator.device)
-                    images.requires_grad_(True)
 
                     rewards = self.reward_model.score_gard(
                         batch["rm_input_ids"].to(self.accelerator.device),
@@ -318,8 +326,10 @@ class Trainer:
                         images,
                     )
 
-                    self.ema_reward = 0.9 * self.ema_reward + 0.1 * rewards.mean().item()
-                    loss = -(rewards - self.ema_reward).mean()
+                    # reward_mean = self.accelerator.gather(rewards.detach()).mean().item()
+                    # self.ema_reward = 0.9 * self.ema_reward + 0.1 * reward_mean
+                    # loss = -(rewards - self.ema_reward).mean()
+                    loss = F.relu(-rewards + 2)
 
                     running_reward += rewards.detach().mean()
                     running_loss += loss.detach().mean()
@@ -345,6 +355,13 @@ class Trainer:
                             f"[epoch {epoch + 1} | step {global_step} / {args.max_train_steps}] "
                             f"reward = {mean_reward:.4f}, loss = {mean_loss:.4f}  "
                         )
+
+                        if self.args.report_to == "wandb":
+                            wandb.log({
+                                "train/reward": mean_reward,
+                                "train/loss": mean_loss,
+                                "train/step": global_step
+                            }, step=global_step)
 
                     running_reward = 0.0
                     accum_count = 0
@@ -402,7 +419,7 @@ class Trainer:
 
             pred_original = latents.float() / self.vae.config.scaling_factor
             images = self.vae.decode(pred_original).sample
-            images = (images / 2 + 0.5).clamp(0, 1)
+            images = (images / 2 + 0.5).clamp_(0, 1)
 
             hps_scores = torch.tensor(
                 self.hps_model.score(images.to(self.accelerator.device), batch["caption"]),
@@ -433,27 +450,63 @@ class Trainer:
             clip_scores = (img_feat * text_feat).sum(-1)
 
             # ------------- аккумуляция -------------
-            running_diversity += diversity.item()
+            running_diversity += diversity
             running_reward += rewards.detach().mean()
             running_hps += hps_scores.detach().mean()
             running_clip += clip_scores.detach().mean()
             accum_count += 1
 
         gen_feats = torch.cat(gen_feats, dim=0)  # (M, D)
-        mu_g = gen_feats.mean(dim=0)
-        Sigma_g = (gen_feats - mu_g).T @ (gen_feats - mu_g) / (gen_feats.size(0) - 1)
+        gen_feats_world = self.accelerator.gather_for_metrics(gen_feats)
+        mu_g = gen_feats_world.mean(dim=0)
+        Sigma_g = (gen_feats_world - mu_g).T @ (gen_feats_world - mu_g) / (gen_feats_world.size(0) - 1)
         eig_g, _ = torch.linalg.eigh(Sigma_g)
         eig_g = eig_g.clamp_min_(1e-9)
 
         lscd = torch.sum((torch.log(self.ref_eig) - torch.log(eig_g)) ** 2).item()
 
+        running_reward_world = self.accelerator.gather_for_metrics(
+            torch.tensor(running_reward, device=self.accelerator.device)
+        )
+        running_hps_world = self.accelerator.gather_for_metrics(running_hps)
+        running_diversity_world = self.accelerator.gather_for_metrics(running_diversity)
+        running_clip_world = self.accelerator.gather_for_metrics(running_clip)
+
+        count_world = self.accelerator.gather_for_metrics(
+            torch.tensor(accum_count, device=self.accelerator.device)
+        ).sum().item()
+
         if self.accelerator.is_main_process:
+            running_reward = running_reward_world.sum().item()
+            running_hps = running_hps_world.sum().item()
+            running_diversity = running_diversity_world.sum().item()
+            running_clip = running_clip_world.sum().item()
+
             logger.info(
-                f"[VAL step {global_step}] reward = {running_reward / accum_count:.4f}, "
-                f"HPS = {running_hps / accum_count:.3f}, Diversity = {running_diversity / accum_count:.4f}, "
-                f"CLIP = {running_clip / accum_count:.4f}, "
+                f"[VAL step {global_step}] reward = {running_reward / count_world:.4f}, "
+                f"HPS = {running_hps / count_world:.3f}, Diversity = {running_diversity / count_world:.4f}, "
+                f"CLIP = {running_clip / count_world:.4f}, "
                 f"LSCD = {lscd:.4f}"
             )
+
+            unet_save_path = os.path.join(self.args.output_dir, f"unet_step_{global_step}.pt")
+            os.makedirs(self.args.output_dir, exist_ok=True)
+            torch.save(self.unet.state_dict(), unet_save_path)
+            logger.info(f"Saved UNet weights after step {global_step} to {unet_save_path}")
+
+            if self.args.report_to == "wandb":
+                wandb.log({
+                    "eval/reward": running_reward / count_world,
+                    "eval/HPS": running_hps / count_world,
+                    "eval/diversity": running_diversity / count_world,
+                    "eval/CLIP": running_clip / count_world,
+                    "eval/LSCD": lscd,
+                    "eval/step": global_step
+                }, step=global_step)
+
+                import torchvision
+                grid_img = torchvision.utils.make_grid(images[0].unsqueeze(0).cpu(), normalize=True)
+                wandb.log({"eval/sample_image": wandb.Image(grid_img)}, step=global_step)
 
 
 if __name__ == "__main__":

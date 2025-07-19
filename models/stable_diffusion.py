@@ -10,7 +10,7 @@ from models.guidance_schedulers import get_guidance_scheduler
 class StableDiffusionWrapper:
     def __init__(self, model_version="runwayml/stable-diffusion-v1-5", device=None, num_steps=50):
         self.device = device
-        self.dtype = torch.float16
+        self.dtype = torch.float32
         self.num_steps = num_steps
 
         scheduler = DPMSolverMultistepScheduler.from_pretrained(
@@ -18,18 +18,18 @@ class StableDiffusionWrapper:
 
         vae = AutoencoderKL.from_pretrained(
             model_version,
-            subfolder="vae", torch_dtype=torch.float16
+            subfolder="vae", torch_dtype=self.dtype
         ).to(self.device)
         tokenizer = CLIPTokenizer.from_pretrained(
             model_version,
             subfolder="tokenizer"
         )
         text_encoder = CLIPTextModel.from_pretrained(
-            model_version, subfolder="text_encoder", torch_dtype=torch.float16
+            model_version, subfolder="text_encoder", torch_dtype=self.dtype
         ).to(self.device)
 
         unet = UNet2DConditionModel.from_pretrained(
-            model_version, subfolder="unet", torch_dtype=torch.float16
+            model_version, subfolder="unet", torch_dtype=self.dtype
         ).to(self.device)
 
         pipeline_kwargs = {
@@ -39,7 +39,7 @@ class StableDiffusionWrapper:
             'text_encoder': text_encoder,
             'unet': unet,
             'vae': vae,
-            'torch_dtype': torch.float16,
+            'torch_dtype': self.dtype,
             'requires_safety_checker': False
         }
         self.pipe = StableDiffusionPipeline.from_pretrained(**pipeline_kwargs)
