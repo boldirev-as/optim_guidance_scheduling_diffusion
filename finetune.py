@@ -2,23 +2,21 @@ import logging
 import math
 import os
 import random
-from functools import partial
 
 from typing import Dict
 
 import wandb
 from accelerate import Accelerator
-from datasets import load_dataset
-from huggingface_hub import hf_hub_download
 from imscore.hps.model import HPSv2
 
 import torch
 import torch.nn.functional as F
 from accelerate.utils import set_seed, ProjectConfiguration
 from torchvision import transforms
+from torchvision.models import inception_v3, Inception_V3_Weights
 from torchvision.transforms import InterpolationMode
 from torch.utils.data import DataLoader
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel, CLIPModel
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPModel
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
@@ -31,6 +29,7 @@ import ImageReward as RM
 
 from config import get_cfg
 from prompt_dataset import ParquetPromptDataset
+from utils import generate_images, calc_eigvals
 
 BICUBIC = InterpolationMode.BICUBIC
 
@@ -104,6 +103,12 @@ class Trainer:
         self.clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
         self.clip.requires_grad_(False)
 
+        self.inception = inception_v3(weights=Inception_V3_Weights.DEFAULT, aux_logits=True, transform_input=False)
+        self.inception.fc = torch.nn.Identity()
+        self.inception.eval()
+        for p in self.inception.parameters():
+            p.requires_grad_(False)
+
         self.reward_model = RM.load("ImageReward-v1.0")
         self.reward_model.eval()
         self.hps_model = HPSv2()
@@ -121,6 +126,7 @@ class Trainer:
         if self.accelerator.is_main_process and args.report_to == "wandb":
             import wandb
             wandb.init(
+                entity='boldirev-as-life',
                 project=args.wandb_project,
                 name=args.wandb_run_name,
                 config=vars(args),
@@ -207,6 +213,7 @@ class Trainer:
         self.reward_model.to(self.accelerator.device, dtype=self.weight_dtype)
         self.hps_model.to(self.accelerator.device, dtype=self.weight_dtype)
         self.clip.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.inception.to('cpu', dtype=self.weight_dtype)
 
         self.rm_preprocess = transforms.Compose([
             transforms.Resize(224, interpolation=BICUBIC),
@@ -228,43 +235,69 @@ class Trainer:
             ),
         ])
 
-        self._build_ref_stats()
+        self.ref_eigvals = 0
+        self.cur_eigvals = 0
 
-    def _build_ref_stats(self):
-        """Load HPDv2‑test, extract CLIP‑vision features and cache eigenvalues."""
-        logger.info("Computing reference eigenvalues for SCD/LSCD (HPDv2‑test)…")
-        ds = load_dataset(
-            "./hpd_test.py",
-            split="test",
-            trust_remote_code=True
-        )
+        self.calc_eigenvalues(create_ref_stats=True)
 
-        ref_loader = DataLoader(
-            ds,
-            batch_size=self.args.eval_batch_size,
-            shuffle=False,
-            num_workers=self.args.dataloader_num_workers,  # <-- тут
-            collate_fn=partial(collate_images, preprocess=self.rm_preprocess_eval)  # <-- тут
-        )
+    @torch.no_grad()
+    def calc_eigenvalues(self, create_ref_stats=True):
+        """extract CLIP‑vision features and cache eigenvalues."""
+        logger.info("Computing eigenvalues for SCD/LSCD")
 
-        feats = []
-        for batch in ref_loader:
-            imgs = batch["image"].to(self.accelerator.device)
-            with torch.no_grad():
-                f = self.clip.vision_model(pixel_values=imgs).pooler_output
-            feats.append(f)
+        prompts = open('prompts.txt', 'r').readlines()
+        prompts = [prompt.strip() for prompt in prompts]
 
-        feats = torch.cat(feats, dim=0)  # (N, D)
-        mu = feats.mean(dim=0)
-        # unbiased sample covariance
-        Sigma = (feats - mu).T @ (feats - mu) / (feats.size(0) - 1)
-        eigvals, _ = torch.linalg.eigh(Sigma)
-        self.ref_eig = eigvals.clamp_min_(1e-9).detach()
-        logger.info("Reference eigenvalues ready (D=%d).", eigvals.size(0))
+        seeds = list(range(50))
+        self.noise_scheduler.set_timesteps(40, device=self.accelerator.device)
 
-    # ------------------------------------------------------------------
-    # training loop
-    # ------------------------------------------------------------------
+        features = []
+
+        for prompt_idx, prompt in enumerate(prompts):
+            print(f'Prompt {prompt_idx}: {prompts[prompt_idx]}')
+            for seed in seeds:
+                encoded_prompt = self.tokenizer(
+                    prompt,
+                    padding="max_length",
+                    truncation=True,
+                    return_tensors="pt",
+                    max_length=77
+                )
+                input_ids = encoded_prompt.input_ids
+                generator = torch.Generator(device='cuda').manual_seed(seed)
+                images = generate_images(
+                    self.unet,
+                    self.text_encoder,
+                    self.weight_dtype,
+                    self.accelerator.device,
+                    self.noise_scheduler,
+                    self.vae,
+                    input_ids,
+                    generator=generator,
+                )
+
+                image = (images[0] * 2 - 1).clamp(-1, 1)
+
+                image_resized = F.interpolate(
+                    image.unsqueeze(0), size=(299, 299),
+                    mode='bilinear', align_corners=False
+                )
+
+                with torch.no_grad():
+                    feat = self.inception(image_resized.cpu())
+                    feat = feat.squeeze(0).cpu()
+                features.append(feat.detach().clone())
+
+                del images, image, image_resized, feat
+                torch.cuda.empty_cache()
+
+        if create_ref_stats:
+            self.ref_eigvals = calc_eigvals(features)
+        else:
+            self.cur_eigvals = calc_eigvals(features)
+
+        logger.info("Eigenvalues ready.")
+
     def train(self):
         args = self.args
         total_batch_size = args.train_batch_size * args.gradient_accumulation_steps * self.accelerator.num_processes
@@ -326,9 +359,6 @@ class Trainer:
                         images,
                     )
 
-                    # reward_mean = self.accelerator.gather(rewards.detach()).mean().item()
-                    # self.ema_reward = 0.9 * self.ema_reward + 0.1 * reward_mean
-                    # loss = -(rewards - self.ema_reward).mean()
                     loss = F.relu(-rewards + 2)
 
                     running_reward += rewards.detach().mean()
@@ -403,23 +433,18 @@ class Trainer:
         running_diversity = 0.0
         running_clip = 0.0
 
-        gen_feats = []
-
         for step, batch in enumerate(self.val_dataloader):
             batch_size = batch["input_ids"].shape[0]
 
-            encoder_hidden_states = self.text_encoder(batch["input_ids"].to(self.accelerator.device))[0]
-            latents = torch.randn((batch_size, 4, 64, 64), device=self.accelerator.device,
-                                  dtype=self.weight_dtype)
-
-            for t in self.noise_scheduler.timesteps:
-                latent_in = self.noise_scheduler.scale_model_input(latents, t)
-                noise_pred = self.unet(latent_in, t, encoder_hidden_states=encoder_hidden_states).sample
-                latents = self.noise_scheduler.step(noise_pred, t, latents).prev_sample
-
-            pred_original = latents.float() / self.vae.config.scaling_factor
-            images = self.vae.decode(pred_original).sample
-            images = (images / 2 + 0.5).clamp_(0, 1)
+            images = generate_images(
+                self.unet,
+                self.text_encoder,
+                self.weight_dtype,
+                self.accelerator.device,
+                self.noise_scheduler,
+                self.vae,
+                batch["input_ids"]
+            )
 
             hps_scores = torch.tensor(
                 self.hps_model.score(images.to(self.accelerator.device), batch["caption"]),
@@ -427,9 +452,9 @@ class Trainer:
             )
 
             images = self.rm_preprocess(images).to(self.accelerator.device)
+
             emb = self.clip.vision_model(pixel_values=images).pooler_output
             emb_norm = F.normalize(emb, dim=-1)
-            gen_feats.append(emb)
 
             rewards = self.reward_model.score_gard(
                 batch["rm_input_ids"].to(self.accelerator.device),
@@ -456,15 +481,6 @@ class Trainer:
             running_clip += clip_scores.detach().mean()
             accum_count += 1
 
-        gen_feats = torch.cat(gen_feats, dim=0)  # (M, D)
-        gen_feats_world = self.accelerator.gather_for_metrics(gen_feats)
-        mu_g = gen_feats_world.mean(dim=0)
-        Sigma_g = (gen_feats_world - mu_g).T @ (gen_feats_world - mu_g) / (gen_feats_world.size(0) - 1)
-        eig_g, _ = torch.linalg.eigh(Sigma_g)
-        eig_g = eig_g.clamp_min_(1e-9)
-
-        lscd = torch.sum((torch.log(self.ref_eig) - torch.log(eig_g)) ** 2).item()
-
         running_reward_world = self.accelerator.gather_for_metrics(
             torch.tensor(running_reward, device=self.accelerator.device)
         )
@@ -477,6 +493,14 @@ class Trainer:
         ).sum().item()
 
         if self.accelerator.is_main_process:
+
+            self.calc_eigenvalues(create_ref_stats=False)
+
+            log_ref = torch.log(self.ref_eigvals)
+            log_gen = torch.log(self.cur_eigvals)
+            diff_log = log_ref - log_gen
+            lscd_sum = torch.sum(diff_log ** 2).item()
+
             running_reward = running_reward_world.sum().item()
             running_hps = running_hps_world.sum().item()
             running_diversity = running_diversity_world.sum().item()
@@ -486,10 +510,10 @@ class Trainer:
                 f"[VAL step {global_step}] reward = {running_reward / count_world:.4f}, "
                 f"HPS = {running_hps / count_world:.3f}, Diversity = {running_diversity / count_world:.4f}, "
                 f"CLIP = {running_clip / count_world:.4f}, "
-                f"LSCD = {lscd:.4f}"
+                f"LSCD = {lscd_sum:.4f}"
             )
 
-            unet_save_path = os.path.join(self.args.output_dir, f"unet_step_{global_step}.pt")
+            unet_save_path = os.path.join(self.args.output_dir, f"unet_step.pt")
             os.makedirs(self.args.output_dir, exist_ok=True)
             torch.save(self.unet.state_dict(), unet_save_path)
             logger.info(f"Saved UNet weights after step {global_step} to {unet_save_path}")
@@ -500,13 +524,13 @@ class Trainer:
                     "eval/HPS": running_hps / count_world,
                     "eval/diversity": running_diversity / count_world,
                     "eval/CLIP": running_clip / count_world,
-                    "eval/LSCD": lscd,
+                    "eval/LSCD": lscd_sum,
                     "eval/step": global_step
                 }, step=global_step)
 
-                import torchvision
-                grid_img = torchvision.utils.make_grid(images[0].unsqueeze(0).cpu(), normalize=True)
-                wandb.log({"eval/sample_image": wandb.Image(grid_img)}, step=global_step)
+            import torchvision
+            grid_img = torchvision.utils.make_grid(images[0].unsqueeze(0).cpu(), normalize=True)
+            wandb.log({"eval/sample_image": wandb.Image(grid_img)}, step=global_step)
 
 
 if __name__ == "__main__":
