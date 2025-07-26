@@ -11,7 +11,7 @@ class ParquetPromptDataset(Dataset):
 
     def __init__(
             self,
-            parquet_path: str,
+            parquet_path: str | list,
             caption_col: str = "prompt",
             tokenizer=None,
             rm_tokenizer=None,
@@ -21,13 +21,17 @@ class ParquetPromptDataset(Dataset):
             seed: int = 42,
     ):
         super().__init__()
-        if train_mode:
-            self.df = pd.read_parquet(parquet_path)
-            self.caption_col = caption_col
+        if isinstance(parquet_path, list):
+            self.val_prompts = parquet_path
+            train_mode = False
         else:
-            with open(parquet_path, "r", encoding="utf-8") as f:
-                val_list = json.load(f)
-            self.val_prompts = [d["prompt"] for d in val_list]
+            if train_mode:
+                self.df = pd.read_parquet(parquet_path)
+                self.caption_col = caption_col
+            else:
+                with open(parquet_path, "r", encoding="utf-8") as f:
+                    val_list = json.load(f)
+                self.val_prompts = [d["prompt"] for d in val_list]
 
         self.tokenizer = tokenizer
         self.rm_tokenizer = rm_tokenizer

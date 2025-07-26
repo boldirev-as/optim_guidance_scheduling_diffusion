@@ -8,6 +8,7 @@ from typing import Dict
 import wandb
 from accelerate import Accelerator
 from imscore.hps.model import HPSv2
+import torch.distributed as dist
 
 import torch
 import torch.nn.functional as F
@@ -21,7 +22,7 @@ from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
     StableDiffusionPipeline,
-    UNet2DConditionModel,
+    UNet2DConditionModel, DPMSolverMultistepScheduler,
 )
 from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
@@ -29,7 +30,7 @@ import ImageReward as RM
 
 from config import get_cfg
 from prompt_dataset import ParquetPromptDataset
-from utils import generate_images, calc_eigvals
+from utils import generate_images, calc_eigvals, preprocess_for_inception
 
 BICUBIC = InterpolationMode.BICUBIC
 
@@ -62,10 +63,6 @@ class Trainer:
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.args = args
 
-        self.ema_reward = self.args.ema_reward
-
-        self.weight_dtype = torch.float32
-
         accelerator_project_config = ProjectConfiguration(total_limit=args.checkpoints_total_limit)
 
         self.accelerator = Accelerator(
@@ -81,7 +78,11 @@ class Trainer:
         if args.logging_dir is not None:
             os.makedirs(args.logging_dir, exist_ok=True)
 
-        logger.info(self.accelerator.state)
+        if self.accelerator.is_main_process:
+            logger.info(self.accelerator.state)
+
+        self.ema_reward = self.args.ema_reward
+        self.weight_dtype = torch.float32
 
         # sched / tokeniser / models
         self.noise_scheduler = DDPMScheduler.from_pretrained(
@@ -100,30 +101,22 @@ class Trainer:
             pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
         )
 
-        self.clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
-        self.clip.requires_grad_(False)
-
-        self.inception = inception_v3(weights=Inception_V3_Weights.DEFAULT, aux_logits=True, transform_input=False)
-        self.inception.fc = torch.nn.Identity()
-        self.inception.eval()
-        for p in self.inception.parameters():
-            p.requires_grad_(False)
+        self.unet.to(self.accelerator.device)
 
         self.reward_model = RM.load("ImageReward-v1.0")
         self.reward_model.eval()
-        self.hps_model = HPSv2()
-        self.hps_model.requires_grad_(False)
 
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
         self.reward_model.requires_grad_(False)
 
-        logger.info(
-            "Trainable UNet params: %d",
-            sum(p.numel() for p in self.unet.parameters() if p.requires_grad),
-        )
+        if self.accelerator.is_main_process:
+            logger.info(
+                "Trainable UNet params: %d",
+                sum(p.numel() for p in self.unet.parameters() if p.requires_grad),
+            )
 
-        if self.accelerator.is_main_process and args.report_to == "wandb":
+        if args.report_to == "wandb" and self.accelerator.is_main_process:
             import wandb
             wandb.init(
                 entity='boldirev-as-life',
@@ -204,16 +197,13 @@ class Trainer:
             num_training_steps=args.max_train_steps,
         )
 
-        self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
-            self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler
+        self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler, self.val_dataloader = self.accelerator.prepare(
+            self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler, self.val_dataloader
         )
 
         self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
         self.reward_model.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.hps_model.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.clip.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.inception.to('cpu', dtype=self.weight_dtype)
 
         self.rm_preprocess = transforms.Compose([
             transforms.Resize(224, interpolation=BICUBIC),
@@ -241,75 +231,154 @@ class Trainer:
         self.calc_eigenvalues(create_ref_stats=True)
 
     @torch.no_grad()
-    def calc_eigenvalues(self, create_ref_stats=True):
-        """extract CLIP‑vision features and cache eigenvalues."""
-        logger.info("Computing eigenvalues for SCD/LSCD")
+    def calc_eigenvalues(self, create_ref_stats: bool = True):
+        """
+        Распределённый подсчёт собственных значений ковариационной матрицы Inception-фич.
+        Каждый процесс генерит свою часть изображений, копит:
+            n_local  = Σ 1
+            s_local  = Σ f
+            S_local  = Σ f f^T
+        Затем делаем all_reduce по всем процессам, считаем ковариацию и eigvals на rank 0,
+        рассылаем результат через broadcast.
 
-        prompts = open('prompts.txt', 'r').readlines()
-        prompts = [prompt.strip() for prompt in prompts]
+        Args:
+            create_ref_stats: True -> сохраняем в self.ref_eigvals, False -> self.cur_eigvals
+        """
+        import torch.distributed as dist
+        from torchvision.models import inception_v3, Inception_V3_Weights
 
+        device = self.accelerator.device
+        rank = self.accelerator.process_index
+        world = self.accelerator.num_processes
+
+        # Если дистрибуция не инициализирована — просто локально считаем и выходим.
+        distributed = dist.is_available() and dist.is_initialized() and world > 1
+
+        # ---------- Подготовка ----------
+        if rank == 0:
+            logger.info("Computing eigenvalues for SCD/LSCD … (distributed=%s)", distributed)
+
+        # Чтобы не попасть в таймаут на барьере, не вызываем wait_for_everyone здесь без необходимости.
+        # Начинаем сразу работать.
+
+        # Модели для фич
+        inception = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False)
+        inception.fc = torch.nn.Identity()
+        inception.eval().requires_grad_(False).to(device, dtype=self.weight_dtype)
+
+        # Датасет для генерации
+        prompts = [p.strip() for p in open("prompts.txt")]
         seeds = list(range(50))
-        self.noise_scheduler.set_timesteps(40, device=self.accelerator.device)
 
-        features = []
+        # Разбиваем задачи между рангами
+        tasks = [(seed, start) for seed in seeds for start in range(0, len(prompts), self.args.eval_batch_size)]
+        if distributed:
+            tasks = tasks[rank::world]
 
-        for prompt_idx, prompt in enumerate(prompts):
-            print(f'Prompt {prompt_idx}: {prompts[prompt_idx]}')
-            for seed in seeds:
-                encoded_prompt = self.tokenizer(
-                    prompt,
-                    padding="max_length",
-                    truncation=True,
-                    return_tensors="pt",
-                    max_length=77
-                )
-                input_ids = encoded_prompt.input_ids
-                generator = torch.Generator(device='cuda').manual_seed(seed)
-                images = generate_images(
-                    self.unet,
-                    self.text_encoder,
-                    self.weight_dtype,
-                    self.accelerator.device,
-                    self.noise_scheduler,
-                    self.vae,
-                    input_ids,
-                    generator=generator,
-                )
+        # Локальные накопители
+        # (инициализируем лениво, когда узнаем размерность фич)
+        D = None
+        n_local = torch.tensor(0, device=device, dtype=torch.long)
+        s_local = None  # [D]
+        S_local = None  # [D, D]
 
-                image = (images[0] * 2 - 1).clamp(-1, 1)
+        for seed, start in tasks:
+            enc = self.tokenizer(
+                prompts[start:start + self.args.eval_batch_size],
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+                max_length=77
+            )
 
-                image_resized = F.interpolate(
-                    image.unsqueeze(0), size=(299, 299),
-                    mode='bilinear', align_corners=False
-                )
+            scheduler = DPMSolverMultistepScheduler.from_pretrained(
+                self.pretrained_model_name_or_path,
+                subfolder="scheduler",
+                use_karras_sigmas=True
+            )
+            scheduler.set_timesteps(25, device=device)
 
-                with torch.no_grad():
-                    feat = self.inception(image_resized.cpu())
-                    feat = feat.squeeze(0).cpu()
-                features.append(feat.detach().clone())
+            gen = torch.Generator(device=device).manual_seed(seed)
 
-                del images, image, image_resized, feat
-                torch.cuda.empty_cache()
+            imgs = generate_images(
+                self.unet, self.text_encoder, self.weight_dtype,
+                device, scheduler, self.vae, enc.input_ids, generator=gen
+            )
+            imgs = preprocess_for_inception(imgs, model_type="pytorch_fid")
 
-        if create_ref_stats:
-            self.ref_eigvals = calc_eigvals(features)
+            feats = inception(imgs.to(device)).to(torch.float64)  # [B, D], используем float64 для стабильности
+
+            if D is None:
+                D = feats.size(1)
+                s_local = torch.zeros(D, device=device, dtype=torch.float64)
+                S_local = torch.zeros(D, D, device=device, dtype=torch.float64)
+
+            n_b = feats.size(0)
+            n_local += n_b
+            s_local += feats.sum(dim=0)
+            S_local += feats.T @ feats
+
+            # Чистим
+            del imgs, feats
+
+        # Если у процесса не было задач (возможна ситуация при малом количестве tasks),
+        # нужно всё равно создать нулевые тензоры правильной формы.
+        if D is None:
+            # Узнаём D у тех, кто его знает.
+            if distributed:
+                D_tensor = torch.tensor([0], device=device, dtype=torch.long)
+                dist.all_reduce(D_tensor, op=dist.ReduceOp.MAX)
+                D_val = D_tensor.item()
+                if D_val == 0:
+                    raise RuntimeError("Не удалось определить размерность фич (ни у кого не было задач).")
+                D = D_val
+            else:
+                raise RuntimeError("No features computed and not in distributed mode.")
+            s_local = torch.zeros(D, device=device, dtype=torch.float64)
+            S_local = torch.zeros(D, D, device=device, dtype=torch.float64)
+
+        # ---------- Редукция по процессам ----------
+        if distributed:
+            dist.all_reduce(n_local, op=dist.ReduceOp.SUM)
+            dist.all_reduce(s_local, op=dist.ReduceOp.SUM)
+            dist.all_reduce(S_local, op=dist.ReduceOp.SUM)
+
+        # ---------- Ковариация и eigenvalues на rank 0 ----------
+        if (not distributed) or rank == 0:
+            N = n_local.item()
+            mean = s_local / N
+            cov = (S_local / N) - torch.outer(mean, mean)  # смещённая оценка; при желании дели на (N-1)
+
+            eigvals = torch.linalg.eigvalsh(cov.cpu()).to(self.weight_dtype).to(device)
         else:
-            self.cur_eigvals = calc_eigvals(features)
+            eigvals = torch.empty(D, device=device, dtype=self.weight_dtype)
 
-        logger.info("Eigenvalues ready.")
+        # ---------- Рассылка eigvals ----------
+        if distributed:
+            dist.broadcast(eigvals, src=0)
+
+        # ---------- Сохранение ----------
+        if create_ref_stats:
+            self.ref_eigvals = eigvals
+        else:
+            self.cur_eigvals = eigvals
+
+        if rank == 0:
+            logger.info("Eigenvalues ready.")
 
     def train(self):
         args = self.args
         total_batch_size = args.train_batch_size * args.gradient_accumulation_steps * self.accelerator.num_processes
 
-        logger.info("***** Running training *****")
-        logger.info("Num examples           = %d", len(self.train_dataset))
-        logger.info("Num epochs             = %d", args.num_train_epochs)
-        logger.info("Instant batch size     = %d", args.train_batch_size)
-        logger.info("Total batch size       = %d", total_batch_size)
-        logger.info("Gradient accum steps   = %d", args.gradient_accumulation_steps)
-        logger.info("Total optimisation steps = %d", args.max_train_steps)
-        logger.info("Num processes          = %f", self.accelerator.num_processes)
+        if self.accelerator.is_main_process:
+            logger.info("***** Running training *****")
+            logger.info("Num examples           = %d", len(self.train_dataset))
+            logger.info("Num epochs             = %d", args.num_train_epochs)
+            logger.info("Instant batch size     = %d", args.train_batch_size)
+            logger.info("Total batch size       = %d", total_batch_size)
+            logger.info("Gradient accum steps   = %d", args.gradient_accumulation_steps)
+            logger.info("Total optimisation steps = %d", args.max_train_steps)
+            logger.info("Num processes          = %f", self.accelerator.num_processes)
 
         # progress_bar = tqdm(range(args.max_train_steps), desc="steps")
         global_step = 0
@@ -419,118 +488,144 @@ class Trainer:
             revision=args.revision,
         )
         pipeline.save_pretrained(args.output_dir)
-        logger.info("Training complete. Model saved to %s", args.output_dir)
+
+        if self.accelerator.is_main_process:
+            logger.info("Training complete. Model saved to %s", args.output_dir)
 
     @torch.no_grad()
     def _evaluate(self, global_step: int):
-
+        """
+        Вал‑метрики вычисляются на КАЖДОМ процессе (DistributedSampler уже делит датасет).
+        После цикла агрегируем суммы/счётчики через Accelerator.gather.
+        Логи, сохранение и WandB — только на главном процессе.
+        """
         self.unet.eval()
-        self.noise_scheduler.set_timesteps(40, device=self.accelerator.device)
 
-        running_reward = 0.0
-        running_hps = 0.0
-        accum_count = 0
-        running_diversity = 0.0
-        running_clip = 0.0
+        # --- вспом. модели ---
+        clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
+        clip.requires_grad_(False)
+        clip.to(self.accelerator.device, dtype=self.weight_dtype)
 
-        for step, batch in enumerate(self.val_dataloader):
-            batch_size = batch["input_ids"].shape[0]
+        hps_model = HPSv2()
+        hps_model.requires_grad_(False)
+        hps_model.to(self.accelerator.device, dtype=self.weight_dtype)
 
+        # --- счётчики ---
+        reward_sum = torch.tensor(0.0, device=self.accelerator.device)
+        hps_sum = torch.tensor(0.0, device=self.accelerator.device)
+        clip_sum = torch.tensor(0.0, device=self.accelerator.device)
+        img_cnt = torch.tensor(0, device=self.accelerator.device, dtype=torch.long)
+
+        diversity_sum = torch.tensor(0.0, device=self.accelerator.device)
+        batch_cnt = torch.tensor(0, device=self.accelerator.device, dtype=torch.long)
+
+        # --------------------------------------------------------------
+        for batch in self.val_dataloader:
+            bsz = batch["input_ids"].size(0)
+
+            scheduler = DPMSolverMultistepScheduler.from_pretrained(
+                self.pretrained_model_name_or_path,
+                subfolder="scheduler",
+                use_karras_sigmas=True
+            )
+            scheduler.set_timesteps(25, device=self.accelerator.device)
+
+            # генерация
             images = generate_images(
-                self.unet,
-                self.text_encoder,
-                self.weight_dtype,
-                self.accelerator.device,
-                self.noise_scheduler,
-                self.vae,
-                batch["input_ids"]
+                self.unet, self.text_encoder, self.weight_dtype,
+                self.accelerator.device, scheduler, self.vae, batch["input_ids"]
             )
 
+            # HPS
             hps_scores = torch.tensor(
-                self.hps_model.score(images.to(self.accelerator.device), batch["caption"]),
-                device=self.accelerator.device,
+                hps_model.score(images, batch["caption"]),
+                device=self.accelerator.device
             )
 
-            images = self.rm_preprocess(images).to(self.accelerator.device)
+            # препроцесс
+            images_rm = self.rm_preprocess(images).to(self.accelerator.device)
 
-            emb = self.clip.vision_model(pixel_values=images).pooler_output
-            emb_norm = F.normalize(emb, dim=-1)
-
+            # reward
             rewards = self.reward_model.score_gard(
                 batch["rm_input_ids"].to(self.accelerator.device),
                 batch["rm_attention_mask"].to(self.accelerator.device),
-                images,
+                images_rm,
             )
 
-            # ------------- метрика diversity -------------
+            # diversity
+            emb = clip.vision_model(pixel_values=images_rm).pooler_output
+            emb_norm = F.normalize(emb, dim=-1)
             sim = emb_norm @ emb_norm.T
-            diversity = (1 - sim).triu(1).sum() * 2 / (batch_size * (batch_size - 1))
+            diversity = (1 - sim).triu(1).sum() * 2 / (bsz * (bsz - 1))
 
-            # ------------- метрика clip -------------
-
-            img_feat = F.normalize(self.clip.get_image_features(pixel_values=images), dim=-1)  # (B,768)
+            # CLIP‑similarity
+            img_feat = F.normalize(clip.get_image_features(pixel_values=images_rm), dim=-1)
             text_feat = F.normalize(
-                self.clip.get_text_features(input_ids=batch["input_ids"].to(self.accelerator.device)),
-                dim=-1)  # (B,768)
+                clip.get_text_features(input_ids=batch["input_ids"].to(self.accelerator.device)),
+                dim=-1
+            )
             clip_scores = (img_feat * text_feat).sum(-1)
 
-            # ------------- аккумуляция -------------
-            running_diversity += diversity
-            running_reward += rewards.detach().mean()
-            running_hps += hps_scores.detach().mean()
-            running_clip += clip_scores.detach().mean()
-            accum_count += 1
+            # --- накопление ---
+            reward_sum += rewards.sum()
+            hps_sum += hps_scores.sum()
+            clip_sum += clip_scores.sum()
+            img_cnt += rewards.numel()
 
-        running_reward_world = self.accelerator.gather_for_metrics(
-            torch.tensor(running_reward, device=self.accelerator.device)
-        )
-        running_hps_world = self.accelerator.gather_for_metrics(running_hps)
-        running_diversity_world = self.accelerator.gather_for_metrics(running_diversity)
-        running_clip_world = self.accelerator.gather_for_metrics(running_clip)
+            diversity_sum += diversity
+            batch_cnt += 1
+        # --------------------------------------------------------------
 
-        count_world = self.accelerator.gather_for_metrics(
-            torch.tensor(accum_count, device=self.accelerator.device)
-        ).sum().item()
+        # --- агрегация между процессами ---
+        reward_sum = self.accelerator.gather(reward_sum).sum()
+        hps_sum = self.accelerator.gather(hps_sum).sum()
+        clip_sum = self.accelerator.gather(clip_sum).sum()
+        img_cnt = self.accelerator.gather(img_cnt).sum()
 
+        diversity_sum = self.accelerator.gather(diversity_sum).sum()
+        batch_cnt = self.accelerator.gather(batch_cnt).sum()
+
+        mean_reward = (reward_sum / img_cnt).item()
+        mean_hps = (hps_sum / img_cnt).item()
+        mean_clip = (clip_sum / img_cnt).item()
+        mean_divers = (diversity_sum / batch_cnt).item()
+
+        self.calc_eigenvalues(create_ref_stats=False)
+
+        # --- LSCD (только на главном) ---
         if self.accelerator.is_main_process:
-
-            self.calc_eigenvalues(create_ref_stats=False)
-
-            log_ref = torch.log(self.ref_eigvals)
-            log_gen = torch.log(self.cur_eigvals)
-            diff_log = log_ref - log_gen
-            lscd_sum = torch.sum(diff_log ** 2).item()
-
-            running_reward = running_reward_world.sum().item()
-            running_hps = running_hps_world.sum().item()
-            running_diversity = running_diversity_world.sum().item()
-            running_clip = running_clip_world.sum().item()
+            ref_eigs = torch.sort(self.ref_eigvals, descending=True).values
+            cur_eigs = torch.sort(self.cur_eigvals, descending=True).values
+            lscd_sum = torch.sum((torch.log(ref_eigs) - torch.log(cur_eigs)) ** 2).item()
 
             logger.info(
-                f"[VAL step {global_step}] reward = {running_reward / count_world:.4f}, "
-                f"HPS = {running_hps / count_world:.3f}, Diversity = {running_diversity / count_world:.4f}, "
-                f"CLIP = {running_clip / count_world:.4f}, "
-                f"LSCD = {lscd_sum:.4f}"
+                f"[VAL step {global_step}] "
+                f"reward={mean_reward:.4f}  HPS={mean_hps:.3f}  "
+                f"Diversity={mean_divers:.4f}  CLIP={mean_clip:.4f}  LSCD={lscd_sum:.4f}"
             )
 
-            unet_save_path = os.path.join(self.args.output_dir, f"unet_step.pt")
+            # сохранение модели
             os.makedirs(self.args.output_dir, exist_ok=True)
-            torch.save(self.unet.state_dict(), unet_save_path)
-            logger.info(f"Saved UNet weights after step {global_step} to {unet_save_path}")
+            unet_path = os.path.join(self.args.output_dir, f"unet_step.pt")
+            torch.save(self.accelerator.unwrap_model(self.unet).state_dict(), unet_path)
 
+            # WandB
             if self.args.report_to == "wandb":
                 wandb.log({
-                    "eval/reward": running_reward / count_world,
-                    "eval/HPS": running_hps / count_world,
-                    "eval/diversity": running_diversity / count_world,
-                    "eval/CLIP": running_clip / count_world,
+                    "eval/reward": mean_reward,
+                    "eval/HPS": mean_hps,
+                    "eval/divers": mean_divers,
+                    "eval/CLIP": mean_clip,
                     "eval/LSCD": lscd_sum,
                     "eval/step": global_step
                 }, step=global_step)
 
+            # пример изображения
             import torchvision
             grid_img = torchvision.utils.make_grid(images[0].unsqueeze(0).cpu(), normalize=True)
             wandb.log({"eval/sample_image": wandb.Image(grid_img)}, step=global_step)
+
+        self.accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":

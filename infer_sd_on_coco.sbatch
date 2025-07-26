@@ -18,7 +18,7 @@ conda activate my_diffusers_new
 
 export WANDB_MODE=offline
 
-#accelerate config default
-#accelerate launch --multi_gpu --num_processes 2 /home/alseboldyrev/GuidanceScheduling_diffusers/finetune.py
+accelerate config default
+accelerate launch --multi_gpu --num_processes 2 /home/alseboldyrev/GuidanceScheduling_diffusers/finetune.py
 
-python /home/alseboldyrev/GuidanceScheduling_diffusers/finetune.py
+#python /home/alseboldyrev/GuidanceScheduling_diffusers/finetune.py

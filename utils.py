@@ -1,4 +1,26 @@
 import torch
+import torch.nn.functional as F
+
+
+def preprocess_for_inception(
+        images: torch.Tensor,
+        model_type: str = "torchvision",
+) -> torch.Tensor:
+    assert images.min() >= 0.0 and images.max() <= 1.0, "Ожидаем [0,1]!"
+
+    x = F.interpolate(images, size=(299, 299), mode="bilinear", align_corners=False)
+
+    if model_type == "torchvision":
+        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
+        x = (x - mean) / std
+
+    elif model_type == "pytorch_fid":
+        pass
+    else:
+        raise ValueError("Unknown model_type")
+
+    return x
 
 
 def generate_images(unet, text_encoder, weight_dtype, device, noise_scheduler, vae, input_ids, generator=None):
@@ -23,12 +45,11 @@ def generate_images(unet, text_encoder, weight_dtype, device, noise_scheduler, v
 def calc_eigvals(features):
     feats = torch.stack(features, dim=0)
     N, D = feats.shape
-    feats = feats.to(torch.float64)
     mu = feats.mean(dim=0)
     Xc = feats - mu
-
     Sigma = (Xc.T @ Xc) / (N - 1)
 
-    eigvals, _ = torch.linalg.eigh(Sigma)
-    eigvals = eigvals.clamp_min(1e-12).to(torch.float32)
+    eigvals, _ = torch.linalg.eigh(Sigma)  # ascending
+    eigvals = eigvals.clamp_min(1e-12)
+    eigvals = torch.sort(eigvals, descending=True).values  # enforce order
     return eigvals

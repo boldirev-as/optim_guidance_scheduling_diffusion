@@ -6,7 +6,9 @@ from transformers.image_transforms import to_pil_image
 from models.stable_diffusion import StableDiffusionWrapper
 
 pretrained_model_name_or_path = 'CompVis/stable-diffusion-v1-4'
-model = StableDiffusionWrapper(device='mps', model_version=pretrained_model_name_or_path)
+model = StableDiffusionWrapper(
+    device='mps', model_version=pretrained_model_name_or_path, num_steps=25
+)
 #
 # noise_scheduler = DDPMScheduler.from_pretrained(
 #     pretrained_model_name_or_path, subfolder="scheduler"
