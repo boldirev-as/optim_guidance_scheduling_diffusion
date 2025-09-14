@@ -1,0 +1,14 @@
+test:
+  _target_: src.datasets.DatasetWrapper
+  dataset_name: "patomp/thai-mscoco-2014-captions"
+  cache_dir: null
+  text_column: 'sentences_raw'
+  image_column: 'image'
+  fixed_length: 5000
+validation:
+  _target_: src.datasets.DatasetWrapper
+  dataset_name: "patomp/thai-mscoco-2014-captions"
+  cache_dir: null
+  text_column: 'sentences_raw'
+  image_column: 'image'
+  fixed_length: 5000

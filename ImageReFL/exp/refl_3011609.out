@@ -1,0 +1,56 @@
+Logging git commit and patch...
+Loaded ViT-H-14 model config.
+Loading pretrained ViT-H-14 weights (laion2B-s32B-b79K).
+load checkpoint from /home/alseboldyrev/.cache/ImageReward/ImageReward.pt
+checkpoint loaded
+train:   0%|          | 0/12 [00:00<?, ?it/s]train:   8%|▊         | 1/12 [00:13<02:31, 13.76s/it]train:  17%|█▋        | 2/12 [00:29<02:27, 14.72s/it]train:  25%|██▌       | 3/12 [00:41<02:03, 13.73s/it]Train Epoch: 1 [0/3 (0%)] Loss: -0.000271
+train:  33%|███▎      | 4/12 [00:55<01:49, 13.73s/it]train:  42%|████▏     | 5/12 [01:07<01:33, 13.31s/it]train:  50%|█████     | 6/12 [01:22<01:22, 13.79s/it]train:  58%|█████▊    | 7/12 [01:37<01:10, 14.09s/it]train:  67%|██████▋   | 8/12 [01:52<00:57, 14.30s/it]train:  75%|███████▌  | 9/12 [02:06<00:42, 14.31s/it]train:  83%|████████▎ | 10/12 [02:19<00:27, 14.00s/it]train:  92%|█████████▏| 11/12 [02:32<00:13, 13.57s/it]train:  92%|█████████▏| 11/12 [02:47<00:15, 15.19s/it]
+test:   0%|          | 0/200 [00:00<?, ?it/s]test:   0%|          | 0/200 [00:31<?, ?it/s]
+Error executing job with overrides: []
+Traceback (most recent call last):
+  File "/home/alseboldyrev/GuidanceScheduling_diffusers/ImageReFL/train.py", line 98, in <module>
+    main()
+  File "/home/alseboldyrev/.conda/envs/image_refl/lib/python3.11/site-packages/hydra/main.py", line 94, in decorated_main
+    _run_hydra(
+  File "/home/alseboldyrev/.conda/envs/image_refl/lib/python3.11/site-packages/hydra/_internal/utils.py", line 394, in _run_hydra
+    _run_app(
+  File "/home/alseboldyrev/.conda/envs/image_refl/lib/python3.11/site-packages/hydra/_internal/utils.py", line 457, in _run_app
+    run_and_report(
+  File "/home/alseboldyrev/.conda/envs/image_refl/lib/python3.11/site-packages/hydra/_internal/utils.py", line 223, in run_and_report
+    raise ex
+  File "/home/alseboldyrev/.conda/envs/image_refl/lib/python3.11/site-packages/hydra/_internal/utils.py", line 220, in run_and_report
+    return func()
+           ^^^^^^
+  File "/home/alseboldyrev/.conda/envs/image_refl/lib/python3.11/site-packages/hydra/_internal/utils.py", line 458, in <lambda>
+    lambda: hydra.run(
+            ^^^^^^^^^^
+  File "/home/alseboldyrev/.conda/envs/image_refl/lib/python3.11/site-packages/hydra/_internal/hydra.py", line 132, in run
+    _ = ret.return_value
+        ^^^^^^^^^^^^^^^^
+  File "/home/alseboldyrev/.conda/envs/image_refl/lib/python3.11/site-packages/hydra/core/utils.py", line 260, in return_value
+    raise self._return_value
+  File "/home/alseboldyrev/.conda/envs/image_refl/lib/python3.11/site-packages/hydra/core/utils.py", line 186, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/alseboldyrev/GuidanceScheduling_diffusers/ImageReFL/train.py", line 94, in main
+    trainer.train()
+  File "/home/alseboldyrev/GuidanceScheduling_diffusers/ImageReFL/src/trainer/base_trainer.py", line 144, in train
+    self._train_process()
+  File "/home/alseboldyrev/GuidanceScheduling_diffusers/ImageReFL/src/trainer/base_trainer.py", line 166, in _train_process
+    result = self._train_epoch(epoch)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/alseboldyrev/GuidanceScheduling_diffusers/ImageReFL/src/trainer/base_trainer.py", line 304, in _train_epoch
+    val_logs = self._evaluation_epoch(epoch, part, dataloader)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/alseboldyrev/GuidanceScheduling_diffusers/ImageReFL/src/trainer/base_trainer.py", line 329, in _evaluation_epoch
+    batch = self.process_batch(
+            ^^^^^^^^^^^^^^^^^^^
+  File "/home/alseboldyrev/GuidanceScheduling_diffusers/ImageReFL/src/trainer/base_trainer.py", line 218, in process_batch
+    reward_model.score(batch=batch)
+  File "/home/alseboldyrev/GuidanceScheduling_diffusers/ImageReFL/src/reward_models/base_model.py", line 44, in score
+    reward = self._get_reward(batch, image)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/alseboldyrev/GuidanceScheduling_diffusers/ImageReFL/src/reward_models/diversity.py", line 50, in _get_reward
+    ss = (1 - sum_vec @ sum_vec.T).triu(1).sum()
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: triu: input tensor must have at least 2 dimensions

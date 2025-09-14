@@ -1,0 +1,20 @@
+defaults:
+  - model: stable_diffusion_15
+  - reward_models: all_rewards
+  - writer: inference_v2
+  - datasets: inference_hps
+  - dataloader: inference_refl_fid
+  - transforms: empty
+  - _self_
+inferencer:
+  type: 'CombinedGenerationInferencer'
+  start_timestep_indexs: [0, 20, 25, 32, 35, 38]
+  end_timestep_index: 40
+  device: auto
+  save_dir: "saved"
+  seed: 42
+  from_pretrained: # you should provide path to checkpoint
+  do_classifier_free_guidance: False
+  save_images_path: 'images_coco/refl_coco'
+  original_model_gs: 7.5
+  model_gs: 7.5

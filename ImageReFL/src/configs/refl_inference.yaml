@@ -1,0 +1,21 @@
+defaults:
+  - model: stable_diffusion_15
+  #  - reward_models: inference
+  #  - writer: inference
+  #  - datasets: inference_hps
+  #  - dataloader: inference_refl
+  #  - transforms: empty
+  - _self_
+model:
+  do_guidance_w_loss: True
+inferencer:
+  type: 'Inference'
+  start_timestep_indexs: [ 0, 5, 10, 15, 20, 25, 28, 30, 32, 34, 35, 36, 37, 38, 39 ]
+  end_timestep_index: 40
+  device: auto
+  save_dir: "saved"
+  seed: 42
+  from_pretrained: 'refl_guidance_saved/test/checkpoint-epoch20.pth'
+  #  'saved/test/checkpoint-epoch10.pth'
+  do_classifier_free_guidance: True
+  save_images_path: null

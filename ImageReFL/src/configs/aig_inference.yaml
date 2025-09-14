@@ -1,0 +1,18 @@
+defaults:
+  - model: stable_diffusion_15
+  - reward_models: all_rewards
+  - writer: inference_v2
+  - datasets: inference_hps
+  - dataloader: inference_refl_fid
+  - transforms: empty
+  - _self_
+inferencer:
+  type: 'AIGInferencer'
+  aig_ps: [1, 1.25, 1.5, 2, 3, 4, 5]
+  end_timestep_index: 40
+  device: auto
+  save_dir: "saved"
+  seed: 42
+  from_pretrained: # you should provide path to checkpoint
+  do_classifier_free_guidance: False
+  save_images_path: 'images_coco/temp'

@@ -1,0 +1,12 @@
+train:
+  _target_: src.datasets.DatasetWrapper
+  dataset_name: "jxie/coco_captions"
+  cache_dir: null
+  text_column: 'caption'
+  image_column: 'image'
+test:
+  _target_: src.datasets.DatasetWrapper
+  dataset_name: "ymhao/HPDv2"
+  cache_dir: null
+  text_column: 'prompt'
+  image_column: 'image'

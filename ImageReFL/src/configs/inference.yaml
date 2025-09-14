@@ -1,0 +1,18 @@
+defaults:
+  - model: stable_diffusion_15
+  - reward_models: inference
+  - writer: inference
+  - datasets: inference_hps
+  - dataloader: inference_refl
+  - transforms: empty
+  - _self_
+inferencer:
+  type: 'Inference'
+  start_timestep_indexs: [0, 5, 10, 15, 20, 25, 28, 30, 32, 34, 35, 36, 37, 38, 39]
+  end_timestep_index: 40
+  device: auto
+  save_dir: "saved"
+  seed: 42
+  from_pretrained: null  # you should provide path to checkpoint
+  do_classifier_free_guidance: False
+  save_images_path: null

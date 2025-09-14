@@ -1,0 +1,16 @@
+train:
+  _target_: src.datasets.DatasetWrapper
+  raw_dataset:
+    _target_: src.datasets.PreferenceDataset
+    dataset_name: "Rapidata/700k_Human_Preference_Dataset_FLUX_SD3_MJ_DALLE3"
+    partition_list: ['train_0001', 'train_0002', 'train_0003', 'train_0004', 'train_0005', 'train_0006', 'train_0007', 'train_0008', 'train_0009', 'train_0010', 'train_0011', 'train_0012', 'train_0013', 'train_0014', 'train_0015', 'train_0016', 'train_0017', 'train_0018', 'train_0019', 'train_0020', 'train_0021', 'train_0022', 'train_0023', 'train_0024', 'train_0025']
+    cache_dir: null
+    text_column: 'caption'
+    image_column: 'image'
+  text_column: 'caption'
+  image_column: 'image'
+test:
+  _target_: src.datasets.DatasetWrapper
+  dataset_name: "ymhao/HPDv2"
+  cache_dir: null
+  text_column: 'prompt'

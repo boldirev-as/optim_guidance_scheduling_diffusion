@@ -1,0 +1,2 @@
+_target_: src.models.PixArt
+pretrained_model_name: "PixArt-alpha/PixArt-XL-2-512x512"

@@ -1,0 +1,10 @@
+test:
+  _target_: torch.utils.data.DataLoader
+  batch_size: 7
+  num_workers: 7
+  pin_memory: True
+validation:
+  _target_: torch.utils.data.DataLoader
+  batch_size: 7
+  num_workers: 7
+  pin_memory: True

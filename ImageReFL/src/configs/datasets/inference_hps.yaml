@@ -1,0 +1,7 @@
+test:
+  _target_: src.datasets.DatasetWrapper
+  dataset_name: "ymhao/HPDv2"
+  cache_dir: null
+  text_column: 'prompt'
+  image_column: 'image'
+  duplicate_count: 5

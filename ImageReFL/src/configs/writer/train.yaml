@@ -1,0 +1,13 @@
+# writer config (image_refl_train)
+_target_: src.logger.wandb.WandBWriter   # keep your real module path
+project_name: "human_diffusion"
+entity: null
+run_name: "test"
+
+# critical changes ↓
+mode: "online"        # was "online"
+resume: "never"        # add this
+id: null               # add this (YAML: null or ~)
+id_length: 0           # prevent auto-generating an ID
+
+log_checkpoints: false

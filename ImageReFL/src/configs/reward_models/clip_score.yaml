@@ -1,0 +1,7 @@
+train_model:
+  _target_: src.reward_models.ClipScore
+val_models:
+  - _target_: src.reward_models.HPS
+  #- _target_: src.reward_models.MPS
+  #  checkpoint_path: null  # you should provide a path to MPS checkpoint in your system
+  - _target_: src.reward_models.PickScore

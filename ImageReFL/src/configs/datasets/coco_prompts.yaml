@@ -1,0 +1,23 @@
+train:
+  _target_: src.datasets.dataset.DatasetWrapper
+  text_column: prompt
+  load_images: false
+  dataset_name: null
+  dataset_split: train
+  text_only_file: data/pick-a-pick/pick-a-pick.json
+  text_only_repo_id: null
+  text_only_field: null
+  text_only_streaming: false
+  all_models_with_tokenizer: ${models.with_tokenizer}
+
+test:
+  _target_: src.datasets.dataset.DatasetWrapper
+  text_column: prompt
+  load_images: false
+  dataset_name: null
+  dataset_split: test
+  text_only_file: data/hpd/hpd.json
+  text_only_repo_id: null
+  text_only_field: null
+  text_only_streaming: false
+  all_models_with_tokenizer: ${models.with_tokenizer}

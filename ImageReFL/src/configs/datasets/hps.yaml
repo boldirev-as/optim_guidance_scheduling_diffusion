@@ -1,0 +1,10 @@
+train:
+  _target_: src.datasets.DatasetWrapper
+  dataset_name: "ymhao/HPDv2"
+  cache_dir: null
+  text_column: 'prompt'
+test:
+  _target_: src.datasets.DatasetWrapper
+  dataset_name: "ymhao/HPDv2"
+  cache_dir: null
+  text_column: 'prompt'

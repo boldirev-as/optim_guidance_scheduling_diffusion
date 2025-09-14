@@ -1,0 +1,2 @@
+_target_: src.models.StableDiffusionXL
+pretrained_model_name: 'stabilityai/stable-diffusion-xl-base-1.0'

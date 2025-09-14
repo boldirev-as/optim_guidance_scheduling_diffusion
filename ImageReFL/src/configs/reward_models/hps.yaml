@@ -1,0 +1,14 @@
+train_model:
+  _target_: src.reward_models.HPS
+val_models:
+  - _target_: src.reward_models.ClipScore
+  #- _target_: src.reward_models.MPS
+  #  checkpoint_path: null  # you should provide a path to MPS checkpoint in your system
+  - _target_: src.reward_models.PickScore
+  - _target_: src.reward_models.ImageReward
+  - _target_: src.reward_models.Diversity
+    images_per_batch: 5
+val_model_metrics:
+  - _target_: src.reward_models.LSCD
+    images_per_batch: 5
+    do_classifier_free_guidance: True
