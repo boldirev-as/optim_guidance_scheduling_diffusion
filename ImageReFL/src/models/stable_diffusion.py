@@ -492,6 +492,7 @@ class StableDiffusion(BaseModel):
         )
         return res, encoder_hidden_states
 
+    @torch.no_grad()
     def get_pil_image(self, raw_images: torch.Tensor) -> list[Image]:
         do_denormalize = [True] * raw_images.shape[0]
         images = self.inference_image_processor.postprocess(

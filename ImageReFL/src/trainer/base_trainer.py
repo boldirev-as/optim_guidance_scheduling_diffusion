@@ -248,6 +248,11 @@ class BaseTrainer:
 
         self.logger.info(self.model.guidance_scale_grad)
 
+        for i in range(len(self.model.guidance_scale_grad)):
+            self.writer.add_scalar(
+                f"guidance scale {i}", self.model.guidance_scale_grad[i]
+            )
+
         for batch in tqdm(
                 self.train_dataloader,
                 desc="train",
@@ -509,10 +514,13 @@ class BaseTrainer:
             mode (str): train or inference. Defines which logging
                 rules to apply.
         """
-        self.writer.add_image(
-            image_name=mode,
-            image=batch["image"],
-        )
+        # self.writer.add_image(
+        #     image_name=mode,
+        #     image=batch["image"],
+        # )
+        pil_images = self.model.get_pil_image(batch["image"])
+        for i, img in enumerate(pil_images):
+            self.writer.add_image(f"{mode}/{i}", img)
 
     def _log_scalars(self, metric_tracker: MetricTracker):
         """
