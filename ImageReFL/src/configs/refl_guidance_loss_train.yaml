@@ -8,10 +8,11 @@ defaults:
   - _self_
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 3e-4
+  lr: 0.3
 lr_scheduler: null
 model:
   do_guidance_w_loss: True
+  no_grad: True
 trainer:
   type: 'ReFL'
   loss_scale: 0.001
@@ -27,7 +28,7 @@ trainer:
   monitor: "off" # "off" or "max/min metric_name", i.e. our goal is to maximize/minimize metric
   save_period: 5 # checkpoint each save_period epochs in addition to the best epoch
   early_stop: ${trainer.n_epochs} # epochs for early stopping
-  save_dir: "tmp"
+  save_dir: "refl_guidance_loss_saved/"
   seed: 1
   mse_loss_scale: 0
   do_classifier_free_guidance: True

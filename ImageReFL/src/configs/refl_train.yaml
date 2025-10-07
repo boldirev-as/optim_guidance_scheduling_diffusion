@@ -9,6 +9,9 @@ defaults:
 optimizer:
   _target_: torch.optim.AdamW
   lr: 3e-4
+model:
+  do_guidance_w_loss: False
+  no_grad: False
 lr_scheduler: null
 trainer:
   type: 'ReFL'

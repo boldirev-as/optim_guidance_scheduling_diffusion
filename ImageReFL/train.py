@@ -69,6 +69,11 @@ def main(config):
         all_models_with_tokenizer=all_models_with_tokenizer,
     )
 
+    if config.model.no_grad:
+        for p in model.parameters():
+            p.requires_grad = False
+        model.guidance_scale_grad.requires_grad = True
+
     # build optimizer, learning rate scheduler
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
     optimizer = instantiate(config.optimizer, params=trainable_params)

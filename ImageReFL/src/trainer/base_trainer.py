@@ -13,6 +13,8 @@ from src.models import StableDiffusion
 from src.reward_models import BaseModel
 from src.utils.io_utils import ROOT_PATH
 
+from src.datasets.collate import collate_fn
+
 
 class BaseTrainer:
     """
@@ -246,12 +248,18 @@ class BaseTrainer:
         batch_idx = 0
         self.optimizer.zero_grad()
 
-        self.logger.info(self.model.guidance_scale_grad)
+        if self.config.model.do_guidance_w_loss:
+            self.logger.info(self.model.guidance_scale_grad)
+            self.logger.info(self.model.guidance_scale_no_grad)
 
-        for i in range(len(self.model.guidance_scale_grad)):
-            self.writer.add_scalar(
-                f"guidance scale {i}", self.model.guidance_scale_grad[i]
-            )
+            # for i in range(len(self.model.guidance_scale_no_grad)):
+            #     self.writer.add_scalar(
+            #         f"guidance/guidance scale {1 + i}", self.model.guidance_scale_no_grad[i]
+            #     )
+            for i in range(len(self.model.guidance_scale_grad)):
+                self.writer.add_scalar(
+                    f"guidance/guidance scale {41 + i}", self.model.guidance_scale_grad[i]
+                )
 
         for batch in tqdm(
                 self.train_dataloader,
@@ -337,6 +345,9 @@ class BaseTrainer:
         self.evaluation_metrics.reset()
         with torch.no_grad():
 
+            first_batches = []
+            need_first_batches = 3
+
             for batch_idx, batch in tqdm(
                     enumerate(dataloader),
                     desc=part,
@@ -346,6 +357,10 @@ class BaseTrainer:
                     batch,
                     metrics=self.evaluation_metrics,
                 )
+
+                if need_first_batches > len(first_batches):
+                    first_batches.append(batch)
+
                 for loss_name in self.evaluation_loss_names:
                     self.evaluation_metrics.update(loss_name, batch[loss_name].item())
 
@@ -356,8 +371,8 @@ class BaseTrainer:
             self.writer.set_step(epoch * self.epoch_len, part)
             self._log_scalars(self.evaluation_metrics)
             self._log_batch(
-                batch_idx, batch, part
-            )  # log only the last batch during inference
+                batch_idx, collate_fn(first_batches), part
+            )
 
         return self.evaluation_metrics.result()
 
@@ -474,7 +489,7 @@ class BaseTrainer:
         Returns:
             total_norm (float): the calculated norm.
         """
-        parameters = self.model.unet.parameters()
+        parameters = self.model.parameters()
         if isinstance(parameters, torch.Tensor):
             parameters = [parameters]
         parameters = [p for p in parameters if p.grad is not None]

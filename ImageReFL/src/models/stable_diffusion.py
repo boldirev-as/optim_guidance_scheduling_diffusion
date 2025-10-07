@@ -33,7 +33,8 @@ class StableDiffusion(BaseModel):
             use_lora: bool = False,
             lora_rank: int | None = None,
             use_image_shifting: bool = False,
-            do_guidance_w_loss: bool = False
+            do_guidance_w_loss: bool = False,
+            no_grad: bool = False
     ) -> None:
         """
         Initializes the components of  StableDiffusion model.
@@ -131,10 +132,14 @@ class StableDiffusion(BaseModel):
 
         self.do_guidance_w_loss = do_guidance_w_loss
 
+        self.guidance_scale_grad = None
+        self.guidance_scale_no_grad = None
+
         if self.do_guidance_w_loss:
             # TODO: not use magic number 40
+            self.guidance_scale_no_grad = torch.full((30,), 7.5, dtype=torch.float32)
             self.guidance_scale_grad = nn.Parameter(
-                torch.full((40,), 7.5, dtype=torch.float32)
+                torch.full((10,), 7.5, dtype=torch.float32)
             )
 
     @staticmethod
@@ -330,13 +335,16 @@ class StableDiffusion(BaseModel):
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
 
-            if detach_main_path:
-                noise_pred_text = noise_pred_text.detach()
-
             if self.do_guidance_w_loss:
-                noise_pred = noise_pred_uncond + self.guidance_scale_grad[timestep_index] * (
-                        noise_pred_text - noise_pred_uncond
-                )
+                # TODO: rewove magic number
+                if timestep_index > 29:
+                    noise_pred = noise_pred_uncond + self.guidance_scale_grad[timestep_index - 30] * (
+                            noise_pred_text - noise_pred_uncond
+                    )
+                else:
+                    noise_pred = noise_pred_uncond + self.guidance_scale_no_grad[timestep_index] * (
+                            noise_pred_text - noise_pred_uncond
+                    )
             else:
                 noise_pred = noise_pred_uncond + self.guidance_scale * (
                         noise_pred_text - noise_pred_uncond
