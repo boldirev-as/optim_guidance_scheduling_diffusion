@@ -1,6 +1,6 @@
 defaults:
   - model: stable_diffusion_15
-  - reward_models: hps
+  - reward_models: clip_score
   - writer: train
   - datasets: coco_prompts
   - dataloader: refl
@@ -8,7 +8,7 @@ defaults:
   - _self_
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 0.3
+  lr: 0.003
 lr_scheduler: null
 model:
   do_guidance_w_loss: True
@@ -16,12 +16,12 @@ model:
 trainer:
   type: 'ReFL'
   loss_scale: 0.001
-  accumulation_steps: 4
+  accumulation_steps: 8
   min_mid_timestep: 30
   max_mid_timestep: 40
   log_step: 5
   n_epochs: 20
-  epoch_len: 100
+  epoch_len: 5
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
   override: False # if True, will override the previous run with the same name

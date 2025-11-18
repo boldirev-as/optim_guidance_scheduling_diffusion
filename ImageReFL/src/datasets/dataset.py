@@ -1,4 +1,5 @@
 import logging
+import random
 import typing as tp
 from pathlib import Path
 
@@ -144,6 +145,9 @@ class DatasetWrapper(Dataset):
             duplicate_count: int | None = None,
             resolution: int = 512,
             load_images: bool = True,
+            use_one: bool = False,
+            seed_range: int = 100,
+            logger=None,
 
             # --- text-only / ОДИН ФАЙЛ ---
             text_only_repo_id: str | None = None,
@@ -155,6 +159,12 @@ class DatasetWrapper(Dataset):
         self.all_models_with_tokenizer = all_models_with_tokenizer
         self.text_column = text_column
         self.load_images = load_images
+
+        self.dataset_split = dataset_split or ""
+
+        self.use_one = use_one
+        self.seed_range = seed_range
+        self.logger = logger
 
         self.image_column = image_column if load_images else None
         self.images_path = Path(images_path) if (images_path and load_images) else None
@@ -271,6 +281,11 @@ class DatasetWrapper(Dataset):
     def __getitem__(self, ind) -> dict[str, tp.Any]:
         original_index = ind
         base_ind = ind
+
+        if self.use_one:
+            # print("USE ONE")
+            base_ind = 10
+
         if self.duplicate_count is not None:
             base_ind //= self.duplicate_count
 
@@ -279,10 +294,17 @@ class DatasetWrapper(Dataset):
             image_index = base_ind % self.images_per_row
             base_ind //= self.images_per_row
 
-        caption = self._get_caption(base_ind)
+        if self.use_one:
+            caption = "girl in red coat on a rainy neon street, night, cinematic, highly detailed"
+        else:
+            caption = self._get_caption(base_ind)
+        # logger.info(f"{caption}")
         res = {"caption": caption}
         for model in self.all_models_with_tokenizer:
             res.update(model.tokenize(caption))
+
+        if self.use_one:
+            res["seeds"] = self.seed_range + ind
 
         if self.load_images and (self.image_column is not None or self.images_path is not None):
             res[DatasetColumns.original_image.name] = self._get_image(
@@ -291,6 +313,9 @@ class DatasetWrapper(Dataset):
         return res
 
     def __len__(self):
+        if self.use_one:
+            return 100
+
         if self.fixed_length is not None:
             return self.fixed_length
         if isinstance(self.raw_dataset, IterableDataset):
@@ -300,7 +325,9 @@ class DatasetWrapper(Dataset):
             length *= self.images_per_row
         if self.duplicate_count is not None:
             length *= self.duplicate_count
-        return length
+        # return length
+        # TODO
+        return 100
 
     @staticmethod
     def _assert_dataset_is_valid(
@@ -313,9 +340,9 @@ class DatasetWrapper(Dataset):
         if not isinstance(raw_dataset, IterableDataset):
             first_row = raw_dataset[0]
             assert isinstance(first_row[text_column], str) or (
-                isinstance(first_row[text_column], list)
-                and first_row[text_column]
-                and isinstance(first_row[text_column][0], str)
+                    isinstance(first_row[text_column], list)
+                    and first_row[text_column]
+                    and isinstance(first_row[text_column][0], str)
             ), "text column must contain str or list[str]"
         if image_column is not None:
             assert (image_column in names), "image_column must be present in raw_dataset"

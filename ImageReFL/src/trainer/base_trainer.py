@@ -15,6 +15,10 @@ from src.utils.io_utils import ROOT_PATH
 
 from src.datasets.collate import collate_fn
 
+from src.constants.dataset import DatasetColumns
+
+import wandb
+
 
 class BaseTrainer:
     """
@@ -206,6 +210,8 @@ class BaseTrainer:
         batch = self.move_batch_to_device(batch)
         batch = self.transform_batch(batch)
 
+        # self.logger.info(f"{batch} {self.is_train}")
+
         if self.is_train:
             with autocast(dtype=torch.bfloat16):
                 batch["loss"] = 0
@@ -213,7 +219,9 @@ class BaseTrainer:
                 self.train_reward_model.score_grad(
                     batch=batch,
                 )
+
                 batch["loss"] = batch["loss"] * self.cfg_trainer.loss_scale
+
             self.scaler.scale(batch["loss"]).backward()
         else:
             with autocast(dtype=torch.bfloat16):
@@ -256,10 +264,10 @@ class BaseTrainer:
             #     self.writer.add_scalar(
             #         f"guidance/guidance scale {1 + i}", self.model.guidance_scale_no_grad[i]
             #     )
-            for i in range(len(self.model.guidance_scale_grad)):
-                self.writer.add_scalar(
-                    f"guidance/guidance scale {41 + i}", self.model.guidance_scale_grad[i]
-                )
+            # for i in range(len(self.model.guidance_scale_grad)):
+            #     self.writer.add_scalar(
+            #         f"guidance/guidance scale {30 + i}", self.model.guidance_scale_grad[i]
+            #     )
 
         for batch in tqdm(
                 self.train_dataloader,
@@ -353,6 +361,7 @@ class BaseTrainer:
                     desc=part,
                     total=len(dataloader),
             ):
+
                 batch = self.process_batch(
                     batch,
                     metrics=self.evaluation_metrics,
@@ -464,9 +473,10 @@ class BaseTrainer:
         transforms = self.batch_transforms.get(transform_type)
         if transforms is not None:
             for transform_name in transforms.keys():
-                batch[transform_name] = transforms[transform_name](
-                    batch[transform_name]
-                )
+                if isinstance(batch[transform_name], torch.Tensor):
+                    batch[transform_name] = transforms[transform_name](
+                        batch[transform_name]
+                    )
         return batch
 
     def _clip_grad_norm(self):
@@ -519,23 +529,32 @@ class BaseTrainer:
         return base.format(current, total, 100.0 * current / total)
 
     def _log_batch(self, batch_idx, batch, mode="train"):
-        """
-        Log generated images.
 
-        Args:
-            batch_idx (int): index of the current batch.
-            batch (dict): dict-based batch after going through
-                the 'process_batch' function.
-            mode (str): train or inference. Defines which logging
-                rules to apply.
-        """
-        # self.writer.add_image(
-        #     image_name=mode,
-        #     image=batch["image"],
-        # )
+        batch_size = batch[DatasetColumns.tokenized_text.name].size(0)
+        device = batch[DatasetColumns.tokenized_text.name].device
+
         pil_images = self.model.get_pil_image(batch["image"])
         for i, img in enumerate(pil_images):
-            self.writer.add_image(f"{mode}/{i}", img)
+            self.writer.add_image(f"{mode}/{batch['caption'][i][-20:]}", img)
+
+            encoder_hidden_states = self.model.get_encoder_hidden_states(
+                batch=batch, do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance
+            )
+
+            latents = self.model.get_latents(batch_size=batch_size, device=device)
+
+            guidance_scales = self.model.get_guidance_scales_schedule(
+                latents=latents,
+                encoder_hidden_states=encoder_hidden_states,
+            )
+
+            print(mode, guidance_scales)
+
+            # self.writer.add_scalars({
+            #     f"{mode}/caption": batch['caption'][i][-20:],
+            #     f"{mode}/guidance_scales_last10_mean": sum(guidance_scales[-10:]) / 10,
+            #     f"{mode}/guidance_scales": wandb.Histogram(guidance_scales)
+            # })
 
     def _log_scalars(self, metric_tracker: MetricTracker):
         """

@@ -44,7 +44,7 @@ def move_batch_transforms_to_device(batch_transforms, device):
                 transforms[transform_name] = transforms[transform_name].to(device)
 
 
-def get_dataloaders(config, device: torch.device, all_models_with_tokenizer: list):
+def get_dataloaders(config, device: torch.device, all_models_with_tokenizer: list, logger):
     """
     Create dataloaders for each of the dataset partitions.
     Also creates instance and batch transforms.
@@ -69,6 +69,7 @@ def get_dataloaders(config, device: torch.device, all_models_with_tokenizer: lis
             config.datasets[dataset_partition],
             dataset_split=dataset_partition,
             all_models_with_tokenizer=all_models_with_tokenizer,
+            logger=logger
         )
         for dataset_partition in config.datasets
     }

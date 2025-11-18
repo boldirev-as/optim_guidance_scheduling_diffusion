@@ -54,10 +54,11 @@ def main(config):
         val_reward_models.append(reward_model)
 
     val_model_metrics = []
-    for reward_model_config in config.reward_models["val_model_metrics"]:
-        reward_model = instantiate(reward_model_config, device=device).to(device)
-        reward_model.requires_grad_(False)
-        val_model_metrics.append(reward_model)
+    if config.reward_models.get("val_model_metrics", None) is not None:
+        for reward_model_config in config.reward_models["val_model_metrics"]:
+            reward_model = instantiate(reward_model_config, device=device).to(device)
+            reward_model.requires_grad_(False)
+            val_model_metrics.append(reward_model)
 
     all_models_with_tokenizer = val_reward_models + [model, train_reward_model]
 
@@ -67,12 +68,14 @@ def main(config):
         config,
         device=device,
         all_models_with_tokenizer=all_models_with_tokenizer,
+        logger=logger
     )
 
     if config.model.no_grad:
         for p in model.parameters():
             p.requires_grad = False
-        model.guidance_scale_grad.requires_grad = True
+        for p in model.guidance_net.parameters():
+            p.requires_grad = True
 
     # build optimizer, learning rate scheduler
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())

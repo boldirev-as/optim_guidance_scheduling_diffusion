@@ -16,6 +16,30 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from src.constants.dataset import DatasetColumns
 from src.models.base_model import BaseModel
 
+import torch.nn.functional as F
+
+
+class GuidanceNet(nn.Module):
+
+    def __init__(self, cond_dim: int, hidden_dim: int = 512):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(cond_dim + 1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, cond: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        if t.dim() == 1:
+            t = t[:, None]  # [B,1]
+
+        x = torch.cat([cond, t], dim=-1)
+        w = self.mlp(x)
+
+        return F.relu(w)
+
 
 class StableDiffusion(BaseModel):
     """
@@ -135,12 +159,10 @@ class StableDiffusion(BaseModel):
         self.guidance_scale_grad = None
         self.guidance_scale_no_grad = None
 
+        self.guidance_net: GuidanceNet | None = None
         if self.do_guidance_w_loss:
-            # TODO: not use magic number 40
-            self.guidance_scale_no_grad = torch.full((30,), 7.5, dtype=torch.float32)
-            self.guidance_scale_grad = nn.Parameter(
-                torch.full((10,), 7.5, dtype=torch.float32)
-            )
+            cond_dim = self.text_encoder.config.hidden_size
+            self.guidance_net = GuidanceNet(cond_dim=cond_dim)
 
     @staticmethod
     def _shift_tensor_batch(images, dx=0, dy=0, fill_value=0):
@@ -166,6 +188,8 @@ class StableDiffusion(BaseModel):
             mode (bool): Whether to enable or disable training mode.
         """
         self.unet.train()
+        if self.guidance_net is not None:
+            self.guidance_net.train()
 
     def eval(self, mode: bool = True):
         """
@@ -175,6 +199,8 @@ class StableDiffusion(BaseModel):
             mode (bool): Whether to enable or disable evaluation mode.
         """
         self.unet.eval()
+        if self.guidance_net is not None:
+            self.guidance_net.eval()
 
     def tokenize(self, caption: str) -> dict[str, tp.Any]:
         """
@@ -298,6 +324,51 @@ class StableDiffusion(BaseModel):
             encoder_hidden_states=encoder_hidden_states,
         ).sample
 
+    @torch.no_grad()
+    def get_guidance_scales_schedule(
+            self,
+            latents: torch.Tensor,
+            encoder_hidden_states: torch.Tensor,
+    ) -> list[float]:
+
+        num_steps = len(self.timesteps)
+        batch_size = latents.shape[0]
+        device = latents.device
+
+        if self.guidance_net is None:
+            return [float(self.guidance_scale)] * num_steps
+
+        _, encoder_hidden_cond = encoder_hidden_states.chunk(2)
+
+        cond_embed = encoder_hidden_cond[:, 0, :]  # [B, D]
+
+        scales: list[float] = []
+
+        for timestep_index in range(num_steps):
+            if timestep_index < 30:
+
+                scale = float(self.guidance_scale)
+            else:
+
+                if num_steps > 1:
+                    t_scalar = float(timestep_index) / float(num_steps - 1)
+                else:
+                    t_scalar = 0.0
+
+                t_vec = torch.full(
+                    (batch_size,),
+                    t_scalar,
+                    device=device,
+                    dtype=cond_embed.dtype,
+                )
+
+                omega = self.guidance_net(cond_embed, t_vec)
+                scale = float(omega.mean().item())
+
+            scales.append(scale)
+
+        return scales
+
     def get_noise_prediction(
             self,
             latents: torch.Tensor,
@@ -335,14 +406,40 @@ class StableDiffusion(BaseModel):
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
 
-            if self.do_guidance_w_loss:
+            if self.guidance_net is not None:
                 # TODO: rewove magic number
-                if timestep_index > 29:
-                    noise_pred = noise_pred_uncond + self.guidance_scale_grad[timestep_index - 30] * (
-                            noise_pred_text - noise_pred_uncond
+                if timestep_index >= 30:
+
+                    batch_size = latents.shape[0]
+                    encoder_hidden_uncond, encoder_hidden_cond = encoder_hidden_states.chunk(2)
+                    cond_embed = encoder_hidden_cond[:, 0, :]
+
+                    num_steps = len(self.timesteps)  # 40
+                    learned_start = 30
+                    learned_steps = num_steps - learned_start  # 10
+
+                    local_idx = timestep_index - learned_start  # 0..9
+                    if learned_steps > 1:
+                        t_scalar = float(local_idx) / float(learned_steps - 1)  # 0..1
+                    else:
+                        t_scalar = 0.0
+
+                    t_vec = torch.full(
+                        (batch_size,),
+                        t_scalar,
+                        device=latents.device,
+                        dtype=cond_embed.dtype,
                     )
+
+                    with torch.enable_grad():
+                        omega = self.guidance_net(cond_embed, t_vec)
+
+                    omega = omega.view(batch_size, 1, 1, 1).to(latents.dtype)
+
+                    noise_pred = noise_pred_uncond + omega * (noise_pred_text - noise_pred_uncond)
+
                 else:
-                    noise_pred = noise_pred_uncond + self.guidance_scale_no_grad[timestep_index] * (
+                    noise_pred = noise_pred_uncond + 7.5 * (
                             noise_pred_text - noise_pred_uncond
                     )
             else:
@@ -422,7 +519,6 @@ class StableDiffusion(BaseModel):
         return latents, noise_pred
 
     def get_latents(self, batch_size: int, device: torch.device, seed: int | None = None) -> torch.Tensor:
-
         generator = torch.Generator(device=device)
 
         if seed is not None:
@@ -512,7 +608,7 @@ class StableDiffusion(BaseModel):
         reward_images = (raw_images / 2 + 0.5).clamp(0, 1)
 
         if self.use_image_shifting:
-            self._shift_tensor_batch(
+            reward_images = self._shift_tensor_batch(
                 reward_images,
                 dx=random.randint(0, math.ceil(self.resolution / 224)),
                 dy=random.randint(0, math.ceil(self.resolution / 224)),

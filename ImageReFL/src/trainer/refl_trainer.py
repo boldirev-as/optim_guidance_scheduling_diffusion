@@ -33,6 +33,7 @@ class ReFLTrainer(BaseTrainer):
                 batch=batch,
                 return_pred_original=False,
                 do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
+                seed=batch.get("seeds", [None])[0]
             )
 
         batch["image"] = self.model.sample_image(
@@ -43,6 +44,7 @@ class ReFLTrainer(BaseTrainer):
             batch=batch,
             do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
             detach_main_path=self.cfg_trainer.detach_main_path,
+            seed=batch.get("seeds", [None])[0]
         )
 
     def _sample_image_eval(self, batch: dict[str, torch.Tensor]):
@@ -65,6 +67,7 @@ class ReFLTrainer(BaseTrainer):
                 batch=batch,
                 return_pred_original=False,
                 do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
+                seed=batch.get("seeds", [None])[0]
             )
 
         batch["image"] = self.model.sample_image(
@@ -75,4 +78,5 @@ class ReFLTrainer(BaseTrainer):
             batch=batch,
             do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
             detach_main_path=self.cfg_trainer.detach_main_path,
+            seed=batch.get("seeds", [None])[0]
         )

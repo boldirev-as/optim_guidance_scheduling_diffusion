@@ -5,6 +5,8 @@ def collate_fn(dataset_items: list[dict]):
     result_batch = {}
 
     for column_name in dataset_items[0].keys():
+        if column_name in ["seeds", "caption"]:
+            result_batch[column_name] = [elem[column_name] for elem in dataset_items]
         if not isinstance(dataset_items[0][column_name], torch.Tensor):
             continue
         result_batch[column_name] = torch.vstack(

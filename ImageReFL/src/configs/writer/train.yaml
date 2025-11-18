@@ -1,7 +1,7 @@
 _target_: src.logger.WandBWriter
 project_name: "human_diffusion"
 entity: null
-run_name: "refl_guidance_optimized_freezed_unet"
+run_name: "refl_guidance_optimized_35-40_freezed_unet"
 mode: "offline"
 log_checkpoints: False
 id_length: 8
