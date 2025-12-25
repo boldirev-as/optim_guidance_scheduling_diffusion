@@ -18,7 +18,8 @@ else:
 
 num_gpus = torch.cuda.device_count() if device == "cuda" else 1
 BATCH_SIZE = 4 if device != "cuda" else 32
-NUM_SAMPLES = 4 if device != "cuda" else 10000
+# Урезаем только число сэмплов для быстрого теста
+NUM_SAMPLES = 8
 TOTAL_STEPS = ceil(NUM_SAMPLES / BATCH_SIZE)
 IMG_SIZE = 512
 NUM_STEPS = 25
