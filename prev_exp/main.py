@@ -61,6 +61,7 @@ def main():
             (real_images * 255).clamp(0, 255).to(torch.uint8).to('cuda' if device == 'cuda' else 'cpu'),
             real=True
         )
+        evaluator.add_real_features(real_images)
 
     generator = torch.Generator(device=device)
 
@@ -68,8 +69,12 @@ def main():
         print(f"\nEvaluating {guidance} guidance scheduler...")
 
         evaluator.fid.reset()
+        evaluator.gen_features = []
 
         clip_scores = []
+        hps_scores = []
+        pick_scores = []
+        diversity_scores = []
         batch_count = 0
 
         coco_data = load_coco_data_batched(
@@ -98,6 +103,10 @@ def main():
             clip_images = (generated_images / 2 + 0.5).clamp(0, 1)
 
             clip_scores.extend(evaluator.compute_clip_score_batch(clip_images, captions))
+            hps_scores.extend(evaluator.compute_hps_batch(clip_images, captions))
+            pick_scores.extend(evaluator.compute_pickscore_batch(clip_images, captions))
+            diversity_scores.append(evaluator.compute_diversity(list(clip_images)))
+            evaluator.add_generated_features(clip_images)
 
             evaluator.fid.update(
                 (clip_images * 255).clamp(0, 255).to(torch.uint8).to(
@@ -107,6 +116,10 @@ def main():
 
         fid_score = evaluator.fid.compute().item()
         avg_clip_score = sum(clip_scores) / len(clip_scores)
+        avg_hps = sum(hps_scores) / len(hps_scores)
+        avg_pick = sum(pick_scores) / len(pick_scores)
+        avg_diversity = sum(diversity_scores) / len(diversity_scores)
+        lscd = evaluator.compute_lscd()
 
         # diversity_images = []
         # diversity_prompts = coco_data['long_captions'] + coco_data['short_captions']
@@ -131,7 +144,11 @@ def main():
         results.append({
             'guidance': guidance,
             'fid': fid_score,
-            'clip_score': avg_clip_score
+            'clip_score': avg_clip_score,
+            'hps': avg_hps,
+            'pickscore': avg_pick,
+            'diversity': avg_diversity,
+            'lscd': lscd,
         })
 
     # plot_results(results)
