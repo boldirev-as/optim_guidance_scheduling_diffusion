@@ -7,6 +7,7 @@ from src.trainer import (
     Inferencer,
     ProFusionInferencer,
     ReFLTrainer,
+    SelfConsistencyTrainer
 )
 
 TRAINER_NAME_TO_CLASS = {
@@ -14,6 +15,7 @@ TRAINER_NAME_TO_CLASS = {
     "ReFL": ReFLTrainer,
     "ImageReFL": ImageReFLTrainer,
     "ImageReFLV2": ImageReFLTrainerV2,
+    "SelfConsistency": SelfConsistencyTrainer
 }
 
 INFERENCER_NAME_TO_CLASS = {

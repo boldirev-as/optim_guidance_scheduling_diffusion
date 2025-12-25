@@ -2,7 +2,7 @@ defaults:
   - model: stable_diffusion_15
   - reward_models: clip_score
   - writer: train
-  - datasets: prompt
+  - datasets: coco_prompts
   - dataloader: refl
   - transforms: empty
   - _self_
@@ -14,7 +14,7 @@ model:
   do_guidance_w_loss: True
   no_grad: True
 trainer:
-  type: 'ReFL'
+  type: 'SelfConsistency'
   loss_scale: 1
   max_grad_norm: 1
   accumulation_steps: 16
@@ -22,7 +22,7 @@ trainer:
   max_mid_timestep: 36
   log_step: 2
   n_epochs: 20
-  epoch_len: 20
+  epoch_len: 5
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
   override: False # if True, will override the previous run with the same name
@@ -33,5 +33,6 @@ trainer:
   seed: 1
   mse_loss_scale: 0
   do_classifier_free_guidance: True
-  detach_main_path: False
-  calculate_initial_model_metrics: True
+  detach_main_path: True
+  calculate_initial_model_metrics: False
+  requires_score_grad: False

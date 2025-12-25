@@ -6,6 +6,7 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from torch.cuda.amp import GradScaler
 
+from src.models.stable_diffusion import GuidanceNet
 from src.constants.trainer import TRAINER_NAME_TO_CLASS
 from src.datasets.data_utils import get_dataloaders
 from src.utils.init_utils import set_random_seed, setup_saving_and_logging
@@ -40,6 +41,11 @@ def main(config):
         model.ema_unet.to(device)
 
     model.do_guidance_w_loss = config.model.do_guidance_w_loss
+
+    # guidance_net = None
+    # if config.model.do_guidance_w_loss:
+    #     cond_dim = model.text_encoder.config.hidden_size
+    #     guidance_net = GuidanceNet(cond_dim=cond_dim, n_t_steps=10, base_scale=7.5).to(device)
 
     # build reward models
     train_reward_model = instantiate(
@@ -76,10 +82,11 @@ def main(config):
             p.requires_grad = False
         for p in model.guidance_net.parameters():
             p.requires_grad = True
+        model.guidance_net.requires_grad_(True)
 
     # build optimizer, learning rate scheduler
-    trainable_params = filter(lambda p: p.requires_grad, model.parameters())
-    optimizer = instantiate(config.optimizer, params=trainable_params)
+    # trainable_params = filter(lambda p: p.requires_grad, model.guidance_net.parameters())
+    optimizer = instantiate(config.optimizer, params=model.guidance_net.parameters())
     lr_scheduler = instantiate(config.lr_scheduler, optimizer=optimizer)
     scaler = GradScaler()
 
@@ -106,6 +113,7 @@ def main(config):
         writer=writer,
         batch_transforms=batch_transforms,
         skip_oom=config.trainer.get("skip_oom", True),
+        # guidance_net=guidance_net
     )
 
     trainer.train()

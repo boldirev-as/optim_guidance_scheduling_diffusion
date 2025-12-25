@@ -1,14 +1,39 @@
+#train:
+#  _target_: src.datasets.dataset.DatasetWrapper
+#  text_column: prompt
+#  load_images: false
+#  dataset_name: null
+#  dataset_split: train
+#  text_only_file: data/pick-a-pick/pick-a-pick.json
+#  text_only_repo_id: null
+#  text_only_field: null
+#  text_only_streaming: false
+#  all_models_with_tokenizer: ${models.with_tokenizer}
+
 train:
   _target_: src.datasets.dataset.DatasetWrapper
-  text_column: prompt
-  load_images: false
-  dataset_name: null
+
+  text_column: captions
+
+  load_images: true
+  dataset_name: phiyodr/coco2017
   dataset_split: train
-  text_only_file: data/pick-a-pick/pick-a-pick.json
+
+  subset_percent: 20
+  subset_size: null
+  subset_seed: 0
+
+  image_column: coco_url
+
+  images_path: null
+  images_per_row: null
+
+  text_only_file: null
   text_only_repo_id: null
   text_only_field: null
   text_only_streaming: false
   all_models_with_tokenizer: ${models.with_tokenizer}
+
 
 test:
   _target_: src.datasets.dataset.DatasetWrapper

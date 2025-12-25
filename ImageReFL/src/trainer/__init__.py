@@ -7,3 +7,4 @@ from src.trainer.image_refl_trainer_v2 import ImageReFLTrainerV2
 from src.trainer.inferencer import Inferencer
 from src.trainer.profusion_inference import ProFusionInferencer
 from src.trainer.refl_trainer import ReFLTrainer
+from src.trainer.guidance_trainer import SelfConsistencyTrainer

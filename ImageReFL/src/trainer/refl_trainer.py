@@ -47,6 +47,11 @@ class ReFLTrainer(BaseTrainer):
             seed=batch.get("seeds", [None])[0]
         )
 
+        base_scale = 7.5
+        lambda_reg = 0.01
+        # batch["loss"] += lambda_reg * ((self.model.last_omegas - base_scale) ** 2).mean()
+        # print("loss guidance", batch["loss"])
+
     def _sample_image_eval(self, batch: dict[str, torch.Tensor]):
         self.model.set_timesteps(self.cfg_trainer.max_mid_timestep, device=self.device)
 

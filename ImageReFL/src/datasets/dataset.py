@@ -13,6 +13,7 @@ from datasets import IterableDataset
 from huggingface_hub import hf_hub_download
 
 from src.constants.dataset import DatasetColumns
+from datasets import Image as HFImage
 from src.utils.io_utils import get_image_name_by_index
 
 logger = logging.getLogger(__name__)
@@ -151,20 +152,25 @@ class DatasetWrapper(Dataset):
 
             # --- text-only / ОДИН ФАЙЛ ---
             text_only_repo_id: str | None = None,
-            text_only_file: str | None = None,  # вместо dict[str, str]
+            text_only_file: str | None = None,
             text_only_field: str | None = None,
-            # default False: JSON локалки часто лучше грузить нестримингово (известная длина и схема)
             text_only_streaming: bool = False,
+
+            # --- NEW: ограничение train на кусок COCO ---
+            subset_percent: int | None = None,  # например 10 => [:10%]
+            subset_size: int | None = None,  # например 50000 => [:50000]
+            subset_seed: int = 0,  # зарезервировано под случайную выборку
     ):
         self.all_models_with_tokenizer = all_models_with_tokenizer
         self.text_column = text_column
         self.load_images = load_images
 
-        self.dataset_split = dataset_split or ""
+        # CHANGED: dataset_split теперь может быть типичной строкой HF (например "train" или "train[:10%]")
+        self.dataset_split = dataset_split or "train"
 
         self.use_one = use_one
         self.seed_range = seed_range
-        self.logger = logger
+        self.logger = logger or logging.getLogger(__name__)
 
         self.image_column = image_column if load_images else None
         self.images_path = Path(images_path) if (images_path and load_images) else None
@@ -179,10 +185,15 @@ class DatasetWrapper(Dataset):
         self.text_only_field = text_only_field
         self.text_only_streaming = text_only_streaming
 
+        # NEW: параметры сабсета
+        self.subset_percent = subset_percent
+        self.subset_size = subset_size
+        self.subset_seed = subset_seed
+
         # 1) Загрузка сырого датасета
         if raw_dataset is None:
             if not self.load_images:
-                # a) Нет dataset_name, но есть одиночный файл — грузим text-only напрямую
+                # text-only режим (как было)
                 if dataset_name is None and self.text_only_file:
                     raw_dataset = _load_text_only_dataset(
                         repo_id=self.text_only_repo_id,
@@ -192,11 +203,11 @@ class DatasetWrapper(Dataset):
                         streaming=self.text_only_streaming,
                     )
                 else:
-                    # b) Пытаемся стримить исходный билдер
+                    # пробуем стримить исходный билдер
                     try:
                         raw_dataset = datasets.load_dataset(
                             dataset_name,
-                            split=dataset_split,
+                            split=self.dataset_split,
                             cache_dir=cache_dir,
                             trust_remote_code=True,
                             streaming=True,
@@ -208,9 +219,9 @@ class DatasetWrapper(Dataset):
                             logger.warning("Builder streaming not supported (TAR). Using text-only fallback.")
                             if not self.text_only_file:
                                 raise RuntimeError(
-                                    "This dataset cannot be streamed (TAR). "
-                                    "Provide text_only_file (local path or HF filename) "
-                                    "and optional text_only_repo_id to load captions only."
+                                    "Этот датасет не поддерживает streaming (TAR). "
+                                    "Передай text_only_file (локальный путь или имя файла в HF) "
+                                    "и опционально text_only_repo_id для загрузки только подписей."
                                 ) from e
                             raw_dataset = _load_text_only_dataset(
                                 repo_id=self.text_only_repo_id,
@@ -222,25 +233,54 @@ class DatasetWrapper(Dataset):
                         else:
                             raise
             else:
-                # Полная загрузка (с изображениями): нужен random access
-                raw_dataset = datasets.load_dataset(
-                    dataset_name,
-                    split=dataset_split,
-                    cache_dir=cache_dir,
-                    trust_remote_code=True,
-                    streaming=False,
-                )
+                # Полная загрузка с изображениями и RANDOM ACCESS.
+                # NEW: аккуратно формируем split с учётом subset_*.
+                effective_split = self._apply_subset_to_split(self.dataset_split)
 
-        # 2) Валидация только нужных колонок
+                try:
+                    raw_dataset = datasets.load_dataset(
+                        dataset_name,
+                        split=effective_split,
+                        cache_dir=cache_dir,
+                        trust_remote_code=True,
+                        streaming=False,  # map-style для __getitem__
+                    )
+                except NotImplementedError as e:
+                    # если билдера нет без streaming, пробуем streaming+materialize ближайший кусок
+                    msg = str(e)
+                    tar_streaming = "iter_archive" in msg or "TAR archives" in msg
+                    if tar_streaming:
+                        raise RuntimeError(
+                            "Датасет хранится в TAR/ZIP архивах и требует скачивания целиком. "
+                            "Выбери репозиторий на HF, где COCO лежит как imagefolder (по одному файлу) "
+                            "или увеличь лимит диска."
+                        ) from e
+                    else:
+                        raise
+
+        if self.load_images and self.images_path is None:
+            col = self.image_column
+            names = getattr(raw_dataset, "column_names", [])
+            if not col:
+                col = "image" if "image" in names else None
+            if col and isinstance(raw_dataset, datasets.Dataset):
+                try:
+                    # если колонка была строкой (путь/URL) — приведём к Image-фиче
+                    raw_dataset = raw_dataset.cast_column(col, HFImage())
+                except Exception:
+                    # не страшно, ниже в _get_image обработаем вручную
+                    pass
+
+        # 2) Валидация колонок
         self._assert_dataset_is_valid(
             raw_dataset=raw_dataset,
             text_column=text_column,
-            image_column=self.image_column if self.load_images else None,
+            image_column=self.image_column if (self.load_images and (self.images_path is None)) else None,
         )
 
         self.raw_dataset = raw_dataset
 
-        # 3) Трансформации изображений (если нужны)
+        # 3) Трансформации изображений
         if self.load_images:
             self.image_process = transforms.Compose(
                 [
@@ -251,6 +291,25 @@ class DatasetWrapper(Dataset):
             )
         else:
             self.image_process = None
+
+    # NEW: конструируем slicing-строку для HF
+    def _apply_subset_to_split(self, split: str) -> str:
+        """
+        Превращает 'train' в 'train[:10%]' или 'train[:50000]' если задан subset_*.
+        Если split уже содержит слайс, оставляем как есть (считаем, что пользователь уверен).
+        """
+        if "[" in split and "]" in split:
+            return split  # пользователь уже передал слайс явно
+
+        if self.subset_percent is not None:
+            assert 0 < self.subset_percent <= 100, "subset_percent должен быть в (0, 100]"
+            return f"{split}[:{self.subset_percent}%]"
+
+        if self.subset_size is not None:
+            assert self.subset_size > 0, "subset_size должен быть > 0"
+            return f"{split}[:{self.subset_size}]"
+
+        return split
 
     def _get_caption(self, ind: int):
         if isinstance(self.raw_dataset, IterableDataset):
@@ -263,19 +322,22 @@ class DatasetWrapper(Dataset):
         return caption
 
     def _get_image(self, ind: int, image_index: int | None, original_index: int) -> torch.Tensor:
+        # локальная папка с изображениями по индексу
         if self.images_path is not None:
             img = Image.open(
                 self.images_path / get_image_name_by_index(original_index + self.local_image_offset)
             ).convert("RGB")
             return self.image_process(img).unsqueeze(0)
 
+        # иначе — берём из датасета (колонка image должна быть PIL или list[PIL])
         data_dict = self.raw_dataset[ind]
-        if isinstance(data_dict[self.image_column], list):
+        # если несколько картинок в примере
+        if self.image_column and isinstance(data_dict[self.image_column], list):
             image_index = image_index or 0
-        if image_index is not None:
             img = data_dict[self.image_column][image_index].convert("RGB")
         else:
-            img = data_dict[self.image_column].convert("RGB")
+            col = self.image_column or "image"
+            img = data_dict[col].convert("RGB")
         return self.image_process(img).unsqueeze(0)
 
     def __getitem__(self, ind) -> dict[str, tp.Any]:
@@ -283,7 +345,6 @@ class DatasetWrapper(Dataset):
         base_ind = ind
 
         if self.use_one:
-            # print("USE ONE")
             base_ind = 10
 
         if self.duplicate_count is not None:
@@ -298,7 +359,7 @@ class DatasetWrapper(Dataset):
             caption = "girl in red coat on a rainy neon street, night, cinematic, highly detailed"
         else:
             caption = self._get_caption(base_ind)
-        # logger.info(f"{caption}")
+
         res = {"caption": caption}
         for model in self.all_models_with_tokenizer:
             res.update(model.tokenize(caption))
@@ -306,7 +367,7 @@ class DatasetWrapper(Dataset):
         if self.use_one:
             res["seeds"] = self.seed_range + ind
 
-        if self.load_images and (self.image_column is not None or self.images_path is not None):
+        if self.load_images:
             res[DatasetColumns.original_image.name] = self._get_image(
                 ind=base_ind, image_index=image_index, original_index=original_index
             )
@@ -325,9 +386,7 @@ class DatasetWrapper(Dataset):
             length *= self.images_per_row
         if self.duplicate_count is not None:
             length *= self.duplicate_count
-        # return length
-        # TODO
-        return 100
+        return length  # CHANGED: теперь реальная длина
 
     @staticmethod
     def _assert_dataset_is_valid(
@@ -336,7 +395,7 @@ class DatasetWrapper(Dataset):
             image_column: str | None = None,
     ) -> None:
         names = getattr(raw_dataset, "column_names", None)
-        assert names and (text_column in names), "text_column must be present in raw_dataset"
+        assert names and (text_column in names), f"text_column must be present in {names}"
         if not isinstance(raw_dataset, IterableDataset):
             first_row = raw_dataset[0]
             assert isinstance(first_row[text_column], str) or (
@@ -345,4 +404,4 @@ class DatasetWrapper(Dataset):
                     and isinstance(first_row[text_column][0], str)
             ), "text column must contain str or list[str]"
         if image_column is not None:
-            assert (image_column in names), "image_column must be present in raw_dataset"
+            assert (image_column in names), f"image_column must be present in {names}"

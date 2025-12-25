@@ -42,7 +42,7 @@ class BaseTrainer:
             writer,
             epoch_len=None,
             skip_oom=True,
-            batch_transforms=None,
+            batch_transforms=None
     ):
         self.is_train = True
 
@@ -136,6 +136,9 @@ class BaseTrainer:
 
         self.val_model_metrics: list[Callable[[StableDiffusion], float]] = val_model_metrics or []
 
+        # self.guidance_net = guidance_net
+        # self.guidance_net.requires_grad_(True)
+
     def _get_train_loss_names(self):
         train_loss_names = [self.train_reward_model.model_suffix, "loss"]
         return train_loss_names
@@ -180,7 +183,6 @@ class BaseTrainer:
             logs = {"epoch": epoch}
             logs.update(result)
 
-            # print logged information to the screen
             for key, value in logs.items():
                 self.logger.info(f"    {key:15s}: {value}")
 
@@ -216,10 +218,13 @@ class BaseTrainer:
             with autocast(dtype=torch.bfloat16):
                 batch["loss"] = 0
                 self._sample_image_train(batch=batch)
-                self.train_reward_model.score_grad(
-                    batch=batch,
-                )
 
+                if self.config.trainer.requires_score_grad:
+                    self.train_reward_model.score_grad(
+                        batch=batch,
+                    )
+
+                # print('total loss', batch['loss'])
                 batch["loss"] = batch["loss"] * self.cfg_trainer.loss_scale
 
             self.scaler.scale(batch["loss"]).backward()
@@ -249,6 +254,10 @@ class BaseTrainer:
         """
         self.is_train = True
         self.model.train()
+
+        if self.model.guidance_net is not None:
+            self.model.guidance_net.train()
+
         self.train_metrics.reset()
         self.writer.set_step((epoch - 1) * self.epoch_len)
         self.writer.add_scalar("epoch", epoch)
@@ -256,18 +265,18 @@ class BaseTrainer:
         batch_idx = 0
         self.optimizer.zero_grad()
 
-        if self.config.model.do_guidance_w_loss:
-            self.logger.info(self.model.guidance_scale_grad)
-            self.logger.info(self.model.guidance_scale_no_grad)
+        # if self.config.model.do_guidance_w_loss:
+        # self.logger.info(self.model.guidance_scale_grad)
+        # self.logger.info(self.model.guidance_scale_no_grad)
 
-            # for i in range(len(self.model.guidance_scale_no_grad)):
-            #     self.writer.add_scalar(
-            #         f"guidance/guidance scale {1 + i}", self.model.guidance_scale_no_grad[i]
-            #     )
-            # for i in range(len(self.model.guidance_scale_grad)):
-            #     self.writer.add_scalar(
-            #         f"guidance/guidance scale {30 + i}", self.model.guidance_scale_grad[i]
-            #     )
+        # for i in range(len(self.model.guidance_scale_no_grad)):
+        #     self.writer.add_scalar(
+        #         f"guidance/guidance scale {1 + i}", self.model.guidance_scale_no_grad[i]
+        #     )
+        # for i in range(len(self.model.guidance_scale_grad)):
+        #     self.writer.add_scalar(
+        #         f"guidance/guidance scale {30 + i}", self.model.guidance_scale_grad[i]
+        #     )
 
         for batch in tqdm(
                 self.train_dataloader,
@@ -279,6 +288,7 @@ class BaseTrainer:
                     batch,
                     metrics=self.train_metrics,
                 )
+
                 for loss_name in self.train_loss_names:
                     if loss_name in batch:
                         self.train_metrics.update(loss_name, batch[loss_name].item())
@@ -291,8 +301,9 @@ class BaseTrainer:
                     raise e
             accumulation_step += 1
             if accumulation_step % self.cfg_trainer.accumulation_steps == 0:
+                self.scaler.unscale_(self.optimizer)  # add
                 self._clip_grad_norm()
-                self.optimizer.step()
+                # self.optimizer.step()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 if self.lr_scheduler is not None:
@@ -350,6 +361,8 @@ class BaseTrainer:
         """
         self.is_train = False
         self.model.eval()
+        if self.model.guidance_net is not None:
+            self.model.guidance_net.eval()
         self.evaluation_metrics.reset()
         with torch.no_grad():
 
@@ -499,7 +512,7 @@ class BaseTrainer:
         Returns:
             total_norm (float): the calculated norm.
         """
-        parameters = self.model.parameters()
+        parameters = self.model.guidance_net.parameters()
         if isinstance(parameters, torch.Tensor):
             parameters = [parameters]
         parameters = [p for p in parameters if p.grad is not None]
@@ -530,31 +543,24 @@ class BaseTrainer:
 
     def _log_batch(self, batch_idx, batch, mode="train"):
 
-        batch_size = batch[DatasetColumns.tokenized_text.name].size(0)
-        device = batch[DatasetColumns.tokenized_text.name].device
+        guidance_scales = self.model.omegas_history
 
-        pil_images = self.model.get_pil_image(batch["image"])
-        for i, img in enumerate(pil_images):
-            self.writer.add_image(f"{mode}/{batch['caption'][i][-20:]}", img)
+        print(mode, guidance_scales)
 
-            encoder_hidden_states = self.model.get_encoder_hidden_states(
-                batch=batch, do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance
-            )
+        # for i, guidance_scale in enumerate(guidance_scales):
+        #     self.writer.add_scalar(
+        #         f"{mode}_guidance/scale_{i}", guidance_scale
+        #     )
 
-            latents = self.model.get_latents(batch_size=batch_size, device=device)
+        if "image" in batch:
+            pil_images = self.model.get_pil_image(batch["image"])
+            for i, img in enumerate(pil_images):
+                self.writer.add_image(f"{mode}/{i}", img)
 
-            guidance_scales = self.model.get_guidance_scales_schedule(
-                latents=latents,
-                encoder_hidden_states=encoder_hidden_states,
-            )
-
-            print(mode, guidance_scales)
-
-            # self.writer.add_scalars({
-            #     f"{mode}/caption": batch['caption'][i][-20:],
-            #     f"{mode}/guidance_scales_last10_mean": sum(guidance_scales[-10:]) / 10,
-            #     f"{mode}/guidance_scales": wandb.Histogram(guidance_scales)
-            # })
+        if DatasetColumns.original_image.name in batch:
+            pil_images = self.model.get_pil_image(batch[DatasetColumns.original_image.name])
+            for i, img in enumerate(pil_images):
+                self.writer.add_image(f"{mode}_real/{i}", img)
 
     def _log_scalars(self, metric_tracker: MetricTracker):
         """

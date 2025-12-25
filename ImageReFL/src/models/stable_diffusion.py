@@ -16,29 +16,116 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from src.constants.dataset import DatasetColumns
 from src.models.base_model import BaseModel
 
-import torch.nn.functional as F
+from collections import deque
 
 
 class GuidanceNet(nn.Module):
-
-    def __init__(self, cond_dim: int, hidden_dim: int = 512):
+    def __init__(
+            self,
+            cond_dim: int,  # hidden_size текстового энкодера (D)
+            time_emb_dim: int = 32,  # фактический dim возьми из UNet.time_embedding.linear_2.out_features
+            hidden_dim: int = 512,
+            base_scale: float = 7.5,
+            pad_id: int | None = None,
+            bos_id: int | None = None,
+            eos_id: int | None = None,
+            use_attn_pool: bool = True,  # можно выключить чтобы быстро сравнить с mean/EOS
+    ):
         super().__init__()
+        self.base_scale = base_scale
+        self.pad_id, self.bos_id, self.eos_id = pad_id, bos_id, eos_id
+        self.use_attn_pool = use_attn_pool
+
+        # маленький обучаемый пулер по токенам
+        self.pool_lin = nn.Linear(cond_dim, cond_dim)
+        self.pool_v = nn.Linear(cond_dim, 1, bias=False)
+
         self.mlp = nn.Sequential(
-            nn.Linear(cond_dim + 1, hidden_dim),
+            nn.Linear(cond_dim + time_emb_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, cond: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        if t.dim() == 1:
-            t = t[:, None]  # [B,1]
+    def _make_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+        # True для валидных токенов (исключаем PAD и, при желании, BOS)
+        mask = torch.ones_like(input_ids, dtype=torch.bool)
+        if self.pad_id is not None:
+            mask &= (input_ids != self.pad_id)
+        if self.bos_id is not None:
+            mask &= (input_ids != self.bos_id)
+        return mask
 
-        x = torch.cat([cond, t], dim=-1)
-        w = self.mlp(x)
+    def _pool_tokens(self, hidden_cond: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        hidden_cond: [B, L, D]  (cond-половина encoder_hidden_states)
+        input_ids:   [B, L]
+        return:      [B, D]
+        """
+        if not self.use_attn_pool and self.eos_id is not None:
+            # EOS pooling (каноничный CLIP)
+            pos = (input_ids == self.eos_id).int().argmax(dim=1)  # [B]
+            b = torch.arange(input_ids.size(0), device=input_ids.device)
+            return hidden_cond[b, pos, :]  # [B, D]
 
-        return F.relu(w)
+        # Learnable attention pooling
+        mask = self._make_mask(input_ids)  # [B, L] bool
+        h = torch.tanh(self.pool_lin(hidden_cond))  # [B, L, D]
+        scores = self.pool_v(h).squeeze(-1)  # [B, L]
+        scores = scores.masked_fill(~mask, float('-inf'))  # маскируем PAD/BOS
+        w = torch.softmax(scores, dim=1)  # [B, L]
+        return (hidden_cond * w.unsqueeze(-1)).sum(dim=1)  # [B, D]
+
+    def _time_embed(self, unet, sample, timestep, timestep_cond=None,
+                    encoder_hidden_states=None, added_cond_kwargs=None):
+        # повторяем твою сборку time/aug emb
+        t_emb = unet.get_time_embed(sample=sample, timestep=timestep)  # [B, time_emb_dim]
+        emb = unet.time_embedding(t_emb, timestep_cond)  # [B, time_emb_dim]
+        aug_emb = unet.get_aug_embed(
+            emb=emb,
+            encoder_hidden_states=encoder_hidden_states,
+            added_cond_kwargs=added_cond_kwargs,
+        )
+        if unet.config.addition_embed_type == "image_hint":
+            aug_emb, _ = aug_emb
+        emb = emb + aug_emb if aug_emb is not None else emb
+        if unet.time_embed_act is not None:
+            emb = unet.time_embed_act(emb)
+        return emb  # [B, time_emb_dim]
+
+    def forward(
+            self,
+            *,
+            unet,
+            encoder_hidden_states: torch.Tensor,
+            input_ids: torch.Tensor,
+            sample: torch.Tensor,
+            timestep: torch.Tensor,
+            timestep_cond: torch.Tensor | None = None,
+            added_cond_kwargs: dict | None = None,
+    ) -> torch.Tensor:
+        B = input_ids.size(0)
+        if encoder_hidden_states.size(0) == 2 * B:
+            _, hidden_cond = encoder_hidden_states.chunk(2)
+        else:
+            hidden_cond = encoder_hidden_states
+
+        cond_embed = self._pool_tokens(hidden_cond, input_ids)
+
+        emb = self._time_embed(
+            unet=unet,
+            sample=sample,
+            timestep=timestep,
+            timestep_cond=timestep_cond,
+            encoder_hidden_states=hidden_cond,
+            added_cond_kwargs=added_cond_kwargs,
+        )
+
+        x = torch.cat([cond_embed, emb], dim=-1)
+        delta = self.mlp(x)
+        omega = self.base_scale + delta
+        return omega
 
 
 class StableDiffusion(BaseModel):
@@ -156,13 +243,29 @@ class StableDiffusion(BaseModel):
 
         self.do_guidance_w_loss = do_guidance_w_loss
 
-        self.guidance_scale_grad = None
-        self.guidance_scale_no_grad = None
+        self.last_omegas = []
+        self.omegas_history = deque(maxlen=10)
 
-        self.guidance_net: GuidanceNet | None = None
-        if self.do_guidance_w_loss:
-            cond_dim = self.text_encoder.config.hidden_size
-            self.guidance_net = GuidanceNet(cond_dim=cond_dim)
+        # if self.do_guidance_w_loss:
+
+        # self.guidance_net = GuidanceNet(
+        #     time_emb_dim=self.unet.time_embedding.linear_2.out_features,
+        #     cond_dim=self.text_encoder.config.hidden_size
+        # )
+        self.guidance_net = GuidanceNet(
+            cond_dim=self.text_encoder.config.hidden_size,
+            time_emb_dim=self.unet.time_embedding.linear_2.out_features,
+            base_scale=self.guidance_scale,
+            pad_id=getattr(self.tokenizer, "pad_token_id", None),
+            bos_id=getattr(self.tokenizer, "bos_token_id", None),
+            eos_id=getattr(self.tokenizer, "eos_token_id", None),
+            use_attn_pool=True,
+        )
+        self.guidance_net.requires_grad_(True)
+
+        # self.guidance_scale_grad = nn.Parameter(
+        #     torch.full((10,), 7.5, dtype=torch.float32)
+        # )
 
     @staticmethod
     def _shift_tensor_batch(images, dx=0, dy=0, fill_value=0):
@@ -188,8 +291,6 @@ class StableDiffusion(BaseModel):
             mode (bool): Whether to enable or disable training mode.
         """
         self.unet.train()
-        if self.guidance_net is not None:
-            self.guidance_net.train()
 
     def eval(self, mode: bool = True):
         """
@@ -199,8 +300,6 @@ class StableDiffusion(BaseModel):
             mode (bool): Whether to enable or disable evaluation mode.
         """
         self.unet.eval()
-        if self.guidance_net is not None:
-            self.guidance_net.eval()
 
     def tokenize(self, caption: str) -> dict[str, tp.Any]:
         """
@@ -324,58 +423,14 @@ class StableDiffusion(BaseModel):
             encoder_hidden_states=encoder_hidden_states,
         ).sample
 
-    @torch.no_grad()
-    def get_guidance_scales_schedule(
-            self,
-            latents: torch.Tensor,
-            encoder_hidden_states: torch.Tensor,
-    ) -> list[float]:
-
-        num_steps = len(self.timesteps)
-        batch_size = latents.shape[0]
-        device = latents.device
-
-        if self.guidance_net is None:
-            return [float(self.guidance_scale)] * num_steps
-
-        _, encoder_hidden_cond = encoder_hidden_states.chunk(2)
-
-        cond_embed = encoder_hidden_cond[:, 0, :]  # [B, D]
-
-        scales: list[float] = []
-
-        for timestep_index in range(num_steps):
-            if timestep_index < 30:
-
-                scale = float(self.guidance_scale)
-            else:
-
-                if num_steps > 1:
-                    t_scalar = float(timestep_index) / float(num_steps - 1)
-                else:
-                    t_scalar = 0.0
-
-                t_vec = torch.full(
-                    (batch_size,),
-                    t_scalar,
-                    device=device,
-                    dtype=cond_embed.dtype,
-                )
-
-                omega = self.guidance_net(cond_embed, t_vec)
-                scale = float(omega.mean().item())
-
-            scales.append(scale)
-
-        return scales
-
     def get_noise_prediction(
             self,
+            batch,
             latents: torch.Tensor,
             timestep_index: int,
             encoder_hidden_states: torch.Tensor,
             do_classifier_free_guidance: bool = False,
-            detach_main_path: bool = False,
+            detach_main_path: bool = False
     ):
         """
         Return noise prediction
@@ -392,51 +447,65 @@ class StableDiffusion(BaseModel):
         """
         timestep = self.timesteps[timestep_index]
 
-        latent_model_input = self.noise_scheduler.scale_model_input(
-            sample=torch.cat([latents] * 2) if do_classifier_free_guidance else latents,
-            timestep=timestep,
-        )
-
-        noise_pred = self._get_unet_prediction(
-            latent_model_input=latent_model_input,
-            timestep=timestep,
-            encoder_hidden_states=encoder_hidden_states,
-        )
+        if detach_main_path:
+            with torch.no_grad():
+                latent_model_input = self.noise_scheduler.scale_model_input(
+                    sample=torch.cat([latents] * 2) if do_classifier_free_guidance else latents,
+                    timestep=timestep,
+                )
+                noise_pred = self._get_unet_prediction(
+                    latent_model_input=latent_model_input,
+                    timestep=timestep,
+                    encoder_hidden_states=encoder_hidden_states,
+                )
+        else:
+            latent_model_input = self.noise_scheduler.scale_model_input(
+                sample=torch.cat([latents] * 2) if do_classifier_free_guidance else latents,
+                timestep=timestep,
+            )
+            noise_pred = self._get_unet_prediction(
+                latent_model_input=latent_model_input,
+                timestep=timestep,
+                encoder_hidden_states=encoder_hidden_states,
+            )
 
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
 
             if self.guidance_net is not None:
                 # TODO: rewove magic number
-                if timestep_index >= 30:
+                if timestep_index >= 0:
 
                     batch_size = latents.shape[0]
-                    encoder_hidden_uncond, encoder_hidden_cond = encoder_hidden_states.chunk(2)
-                    cond_embed = encoder_hidden_cond[:, 0, :]
+                    _, latent_model_input_cond = latent_model_input.chunk(2)
+                    # encoder_hidden_uncond, encoder_hidden_cond = encoder_hidden_states.chunk(2)
 
-                    num_steps = len(self.timesteps)  # 40
-                    learned_start = 30
-                    learned_steps = num_steps - learned_start  # 10
+                    enc_for_guidance = encoder_hidden_states.detach()
+                    sample_for_guidance = latent_model_input_cond.detach()
 
-                    local_idx = timestep_index - learned_start  # 0..9
-                    if learned_steps > 1:
-                        t_scalar = float(local_idx) / float(learned_steps - 1)  # 0..1
-                    else:
-                        t_scalar = 0.0
-
-                    t_vec = torch.full(
-                        (batch_size,),
-                        t_scalar,
-                        device=latents.device,
-                        dtype=cond_embed.dtype,
-                    )
-
-                    with torch.enable_grad():
-                        omega = self.guidance_net(cond_embed, t_vec)
+                    with torch.cuda.amp.autocast(enabled=False):
+                        omega = self.guidance_net(
+                            unet=self.unet,
+                            encoder_hidden_states=enc_for_guidance,  # [2B,L,D] ок
+                            input_ids=batch[DatasetColumns.tokenized_text.name],  # [B,L]
+                            sample=sample_for_guidance,  # cond-вход UNet
+                            timestep=timestep,
+                            timestep_cond=None,
+                            added_cond_kwargs=None,
+                        )
+                        # omega = self.guidance_net(cond_embed, t_index)
 
                     omega = omega.view(batch_size, 1, 1, 1).to(latents.dtype)
 
-                    noise_pred = noise_pred_uncond + omega * (noise_pred_text - noise_pred_uncond)
+                    self.last_omegas = omega
+                    self.omegas_history.append(omega.detach())
+
+                    if detach_main_path:
+                        noise_pred_uncond = noise_pred_uncond.detach()
+                        delta = (noise_pred_text - noise_pred_uncond).detach()
+                        noise_pred = noise_pred_uncond + omega * delta
+                    else:
+                        noise_pred = noise_pred_uncond + omega * (noise_pred_text - noise_pred_uncond)
 
                 else:
                     noise_pred = noise_pred_uncond + 7.5 * (
@@ -483,7 +552,7 @@ class StableDiffusion(BaseModel):
             batch: dict[str, torch.Tensor],
             return_pred_original: bool = False,
             do_classifier_free_guidance: bool = False,
-            detach_main_path: bool = False,
+            detach_main_path: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Predicts the next latent states during the diffusion process.
@@ -507,6 +576,7 @@ class StableDiffusion(BaseModel):
             encoder_hidden_states=encoder_hidden_states,
             do_classifier_free_guidance=do_classifier_free_guidance,
             detach_main_path=detach_main_path,
+            batch=batch
         )
 
         latents = self.sample_next_latents(
@@ -546,7 +616,7 @@ class StableDiffusion(BaseModel):
             return_pred_original: bool = False,
             do_classifier_free_guidance: bool = False,
             detach_main_path: bool = False,
-            seed: int | None = None,
+            seed: int | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Performs multiple diffusion steps between specified timesteps.
@@ -584,7 +654,7 @@ class StableDiffusion(BaseModel):
                 batch=batch,
                 return_pred_original=False,
                 do_classifier_free_guidance=do_classifier_free_guidance,
-                detach_main_path=detach_main_path,
+                detach_main_path=detach_main_path
             )
         res, _ = self.predict_next_latents(
             latents=latents,
@@ -592,7 +662,7 @@ class StableDiffusion(BaseModel):
             encoder_hidden_states=encoder_hidden_states,
             batch=batch,
             return_pred_original=return_pred_original,
-            do_classifier_free_guidance=do_classifier_free_guidance,
+            do_classifier_free_guidance=do_classifier_free_guidance
         )
         return res, encoder_hidden_states
 
@@ -666,7 +736,7 @@ class StableDiffusion(BaseModel):
             end_timestep_index: int,
             batch: dict[str, torch.Tensor],
             encoder_hidden_states: torch.Tensor | None = None,
-            do_classifier_free_guidance: bool = False,
+            do_classifier_free_guidance: bool = False
     ) -> tuple[torch.Tensor, list[Image]]:
         """
         Generates an image sample by decoding the latents.
@@ -690,7 +760,7 @@ class StableDiffusion(BaseModel):
             batch=batch,
             encoder_hidden_states=encoder_hidden_states,
             return_pred_original=True,
-            do_classifier_free_guidance=do_classifier_free_guidance,
+            do_classifier_free_guidance=do_classifier_free_guidance
         )
 
         pred_original_sample /= self.vae.config.scaling_factor
