@@ -3,7 +3,7 @@
 #SBATCH --gpus=2
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=150:00:00
+#SBATCH --time=2:00:00
 #SBATCH --mail-user=alseboldyrev@edu.hse.ru
 #SBATCH --mail-type=FAIL
 #SBATCH --constraint="type_a|type_b|type_c"
