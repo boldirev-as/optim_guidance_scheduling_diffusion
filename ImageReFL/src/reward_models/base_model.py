@@ -30,7 +30,7 @@ class BaseModel(torch.nn.Module):
             self,
             batch: tp.Dict[str, torch.Tensor],
     ) -> None:
-        image = batch["image"]
+        image = batch["image"].float()
         reward = self._get_reward(batch, image)
         loss = -(reward + self.reward_offset) * self.reward_scale_factor
         batch["loss"] += loss.mean()
@@ -41,7 +41,7 @@ class BaseModel(torch.nn.Module):
             batch: tp.Dict[str, torch.Tensor],
             *args, **kwargs
     ) -> None:
-        image = batch["image"]
+        image = batch["image"].float()
         with torch.no_grad():
             reward = self._get_reward(batch, image, *args, **kwargs)
         batch[self.model_suffix] = reward.mean().detach()

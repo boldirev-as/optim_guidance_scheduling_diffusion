@@ -215,14 +215,15 @@ class BaseTrainer:
         # self.logger.info(f"{batch} {self.is_train}")
 
         if self.is_train:
+            batch["loss"] = 0
             with autocast(dtype=torch.bfloat16):
-                batch["loss"] = 0
                 self._sample_image_train(batch=batch)
 
-                if self.config.trainer.requires_score_grad:
-                    self.train_reward_model.score_grad(
-                        batch=batch,
-                    )
+            if self.config.trainer.get("requires_score_grad", False):
+                # Считаем reward без автокаста, чтобы сохранить точность CLIP/HPS
+                self.train_reward_model.score_grad(
+                    batch=batch,
+                )
 
                 # print('total loss', batch['loss'])
                 batch["loss"] = batch["loss"] * self.cfg_trainer.loss_scale
@@ -231,13 +232,14 @@ class BaseTrainer:
         else:
             with autocast(dtype=torch.bfloat16):
                 self._sample_image_eval(batch=batch)
-                self.train_reward_model.score(
+            # Считаем метрики в fp32
+            self.train_reward_model.score(
+                batch=batch
+            )
+            for reward_model in self.val_reward_models:
+                reward_model.score(
                     batch=batch
                 )
-                for reward_model in self.val_reward_models:
-                    reward_model.score(
-                        batch=batch
-                    )
 
         return batch
 
@@ -498,9 +500,11 @@ class BaseTrainer:
         config.trainer.max_grad_norm
         """
         if self.config["trainer"].get("max_grad_norm", None) is not None:
-            clip_grad_norm_(
-                self.model.unet.parameters(), self.config["trainer"]["max_grad_norm"]
-            )
+            params = []
+            for group in self.optimizer.param_groups:
+                params.extend([p for p in group["params"] if p.grad is not None])
+            if params:
+                clip_grad_norm_(params, self.config["trainer"]["max_grad_norm"])
 
     @torch.no_grad()
     def _get_grad_norm(self, norm_type=2):
@@ -520,7 +524,7 @@ class BaseTrainer:
             torch.stack([torch.norm(p.grad.detach(), norm_type) for p in parameters]),
             norm_type,
         )
-        return total_norm.item()
+        return total_norm.item() if len(parameters) > 0 else 0.0
 
     def _progress(self, batch_idx):
         """

@@ -47,6 +47,9 @@ class GuidanceNet(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, 1),
         )
+        # Инициализация последнего слоя нулями, чтобы стартовать ровно с base_scale
+        init.zeros_(self.mlp[-1].weight)
+        init.zeros_(self.mlp[-1].bias)
 
     def _make_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
         # True для валидных токенов (исключаем PAD и, при желании, BOS)
@@ -472,7 +475,7 @@ class StableDiffusion(BaseModel):
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
 
-            if self.guidance_net is not None:
+            if self.guidance_net is not None and self.do_guidance_w_loss:
                 # TODO: rewove magic number
                 if timestep_index >= 0:
 
