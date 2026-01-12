@@ -557,7 +557,13 @@ class BaseTrainer:
             if "mid_timestep" in batch:
                 self.writer.add_scalar(f"{mode}_mid_timestep", float(batch["mid_timestep"]))
             if "seeds" in batch and batch["seeds"]:
-                self.writer.add_scalar(f"{mode}_seed", float(batch["seeds"][0]))
+                seed_candidate = batch["seeds"][0]
+                if isinstance(seed_candidate, (list, tuple)):
+                    seed_value = seed_candidate[0] if seed_candidate else None
+                else:
+                    seed_value = seed_candidate
+                if seed_value is not None:
+                    self.writer.add_scalar(f"{mode}_seed", float(seed_value))
             if torch.is_tensor(self.model.last_omegas) and self.model.last_omegas.numel() > 0:
                 omegas = self.model.last_omegas.float().detach()
                 self.writer.add_scalar(f"{mode}_guidance/omega_mean", omegas.mean().item())
