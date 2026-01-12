@@ -1,5 +1,6 @@
 train_model:
   _target_: src.reward_models.HPS
+  light_augmentation: false
 val_models:
   - _target_: src.reward_models.ClipScore
   #- _target_: src.reward_models.MPS

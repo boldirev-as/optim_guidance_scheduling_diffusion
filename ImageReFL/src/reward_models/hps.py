@@ -17,7 +17,7 @@ MODEL_SUFFIX = "HPS"
 
 
 class HPS(BaseModel):
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, light_augmentation: bool = True):
         super().__init__(
             model_suffix=MODEL_SUFFIX, reward_scale_factor=1, reward_offset=0
         )
@@ -35,7 +35,7 @@ class HPS(BaseModel):
             pretrained_image=False,
             image_mean=None,
             image_std=None,
-            light_augmentation=True,
+            light_augmentation=light_augmentation,
             aug_cfg={},
             output_dict=True,
             with_score_predictor=False,
