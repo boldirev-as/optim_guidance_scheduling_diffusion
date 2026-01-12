@@ -1,6 +1,12 @@
 import sys
 from math import ceil
 import platform
+from pathlib import Path
+
+# Ensure project root is on sys.path so `data` and other modules resolve
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 from tqdm import tqdm
@@ -17,75 +23,67 @@ else:
     device = 'cpu'
 
 num_gpus = torch.cuda.device_count() if device == "cuda" else 1
-BATCH_SIZE = 4 if device != "cuda" else 32
-# Урезаем только число сэмплов для быстрого теста
-NUM_SAMPLES = 8
+BATCH_SIZE = 1
+NUM_SAMPLES = 100  # только текстовые промпты, без загрузки датасетов
 TOTAL_STEPS = ceil(NUM_SAMPLES / BATCH_SIZE)
 IMG_SIZE = 512
-NUM_STEPS = 25
+NUM_STEPS = 10
 
 
 def main():
     print(f"Using device: {device}")
     print(f"Number of GPUs: {num_gpus}")
 
-    print("Loading COCO data in batches...")
-    coco_data = load_coco_data_batched(
-        split='val',
-        num_samples=NUM_SAMPLES,
-        batch_size=BATCH_SIZE,
-        image_size=IMG_SIZE
-    )
+    print("Loading prompts...")
+    prompts_file = PROJECT_ROOT / "prompts.txt"
+    if prompts_file.exists():
+        prompts = [p.strip() for p in prompts_file.read_text().splitlines() if p.strip()]
+    else:
+        prompts = []
+    if not prompts:
+        prompts = [
+            "a photo of a cat on a skateboard",
+            "a scenic mountain landscape at sunrise",
+            "a futuristic city street at night with neon lights",
+            "a portrait of an astronaut in a forest",
+            "a bowl of ramen on a wooden table",
+            "a cozy cabin in the snow",
+            "a colorful parrot in a jungle",
+            "a classic car parked near the beach",
+        ]
+    prompts = prompts[:NUM_SAMPLES]
 
     print("Initializing models...")
     sd = StableDiffusionWrapper(device=device, num_steps=NUM_STEPS)
     evaluator = Evaluator(device=device)
 
-    # 1 3 5 7 9 11 13 15 20
-    guidance_types = [
-                         ("baseline", 1), ("linear", 1), ("cosine", 1),
-                         ("baseline", 3), ("linear", 3), ("cosine", 3),
-                         ("baseline", 5), ("linear", 5), ("cosine", 5),
-                         ("baseline", 7), ("linear", 7), ("cosine", 7),
-                         ("baseline", 9), ("linear", 9), ("cosine", 9),
-                         ("baseline", 11), ("linear", 11), ("cosine", 11),
-                         ("baseline", 13), ("linear", 13), ("cosine", 13),
-                         ("baseline", 15), ("linear", 15), ("cosine", 15),
-                         ("baseline", 20), ("linear", 20), ("cosine", 20)][::-1]
-
-    # guidance_types = [("baseline", 20), ("linear", 20), ("cosine", 20)]
+    # guidance combinations: baseline scales, cosine, linear
+    scales = [1, 3, 5, 7, 9, 11, 13, 15, 20]
+    guidance_types = (
+        [("baseline", s) for s in scales]
+        + [("cosine", s) for s in scales]
+        + [("linear", s) for s in scales]
+    )
 
     results = []
 
-    for real_images, _ in tqdm(coco_data['batches'], total=TOTAL_STEPS):
-        evaluator.fid.update(
-            (real_images * 255).clamp(0, 255).to(torch.uint8).to('cuda' if device == 'cuda' else 'cpu'),
-            real=True
-        )
-        evaluator.add_real_features(real_images)
-
     generator = torch.Generator(device=device)
+
+    baseline_ref_features = None
+    all_images_for_diversity = []
 
     for guidance, guidance_strength in guidance_types:
         print(f"\nEvaluating {guidance} guidance scheduler...")
 
-        evaluator.fid.reset()
         evaluator.gen_features = []
 
         clip_scores = []
         hps_scores = []
         pick_scores = []
-        diversity_scores = []
         batch_count = 0
 
-        coco_data = load_coco_data_batched(
-            split='val',
-            num_samples=NUM_SAMPLES,
-            batch_size=BATCH_SIZE,
-            image_size=IMG_SIZE
-        )
-
-        for _, captions in tqdm(coco_data['batches'], total=TOTAL_STEPS):
+        for start in tqdm(range(0, len(prompts), BATCH_SIZE), total=TOTAL_STEPS):
+            captions = prompts[start:start + BATCH_SIZE]
             batch_count += 1
 
             generated_images = sd.generate_images(
@@ -106,20 +104,20 @@ def main():
             clip_scores.extend(evaluator.compute_clip_score_batch(clip_images, captions))
             hps_scores.extend(evaluator.compute_hps_batch(clip_images, captions))
             pick_scores.extend(evaluator.compute_pickscore_batch(clip_images, captions))
-            diversity_scores.append(evaluator.compute_diversity(list(clip_images)))
+            all_images_for_diversity.extend([img.detach().cpu() for img in clip_images])
             evaluator.add_generated_features(clip_images)
 
-            evaluator.fid.update(
-                (clip_images * 255).clamp(0, 255).to(torch.uint8).to(
-                    'cuda' if device == 'cuda' else 'cpu'),
-                real=False
-            )
-
-        fid_score = evaluator.fid.compute().item()
         avg_clip_score = sum(clip_scores) / len(clip_scores)
         avg_hps = sum(hps_scores) / len(hps_scores)
         avg_pick = sum(pick_scores) / len(pick_scores)
-        avg_diversity = sum(diversity_scores) / len(diversity_scores)
+        avg_diversity = evaluator.compute_diversity(all_images_for_diversity)
+        # Для LSCD используем фичи первого запуска как референс
+        if baseline_ref_features is None:
+            # clone list of tensors to avoid mutation
+            baseline_ref_features = [t.clone() for t in evaluator.gen_features]
+            evaluator.real_features = baseline_ref_features
+        else:
+            evaluator.real_features = baseline_ref_features
         lscd = evaluator.compute_lscd()
 
         # diversity_images = []
@@ -144,7 +142,6 @@ def main():
 
         results.append({
             'guidance': guidance,
-            'fid': fid_score,
             'clip_score': avg_clip_score,
             'hps': avg_hps,
             'pickscore': avg_pick,
@@ -158,7 +155,10 @@ def main():
     print(results)
     for result in results:
         print(
-            f"{result['guidance']:8s} | FID: {result['fid']:6.2f} | CLIP-Score: {result['clip_score']:.3f}")
+            f"{result['guidance']:8s} | CLIP-Score: {result['clip_score']:.3f} | "
+            f"HPS: {result['hps']:.3f} | PickScore: {result['pickscore']:.3f} | "
+            f"Diversity: {result['diversity']:.3f} | LSCD: {result['lscd']:.3f}"
+        )
 
 
 if __name__ == "__main__":

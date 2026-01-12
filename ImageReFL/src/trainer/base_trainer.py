@@ -228,6 +228,8 @@ class BaseTrainer:
                 # print('total loss', batch['loss'])
                 batch["loss"] = batch["loss"] * self.cfg_trainer.loss_scale
 
+            # Normalize for gradient accumulation to keep the effective LR stable.
+            batch["loss"] = batch["loss"] / self.cfg_trainer.accumulation_steps
             self.scaler.scale(batch["loss"]).backward()
         else:
             with autocast(dtype=torch.bfloat16):
@@ -550,6 +552,18 @@ class BaseTrainer:
         guidance_scales = self.model.omegas_history
 
         print(mode, guidance_scales)
+
+        if self.writer is not None:
+            if "mid_timestep" in batch:
+                self.writer.add_scalar(f"{mode}_mid_timestep", float(batch["mid_timestep"]))
+            if "seeds" in batch and batch["seeds"]:
+                self.writer.add_scalar(f"{mode}_seed", float(batch["seeds"][0]))
+            if torch.is_tensor(self.model.last_omegas) and self.model.last_omegas.numel() > 0:
+                omegas = self.model.last_omegas.float().detach()
+                self.writer.add_scalar(f"{mode}_guidance/omega_mean", omegas.mean().item())
+                self.writer.add_scalar(f"{mode}_guidance/omega_std", omegas.std().item())
+                self.writer.add_scalar(f"{mode}_guidance/omega_min", omegas.min().item())
+                self.writer.add_scalar(f"{mode}_guidance/omega_max", omegas.max().item())
 
         # for i, guidance_scale in enumerate(guidance_scales):
         #     self.writer.add_scalar(

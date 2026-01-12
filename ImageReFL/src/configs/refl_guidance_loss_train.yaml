@@ -1,6 +1,6 @@
 defaults:
   - model: stable_diffusion_15
-  - reward_models: clip_score
+  - reward_models: hps
   - writer: train
   - datasets: prompt
   - dataloader: refl
@@ -36,3 +36,11 @@ trainer:
   detach_main_path: False
   calculate_initial_model_metrics: True
   requires_score_grad: True
+dataloader:
+  test:
+    batch_size: 1
+datasets:
+  train:
+    single_prompt: "girl in red coat on a rainy neon street, night, cinematic, highly detailed"
+  test:
+    single_prompt: "girl in red coat on a rainy neon street, night, cinematic, highly detailed"

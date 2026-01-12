@@ -149,6 +149,7 @@ class DatasetWrapper(Dataset):
             use_one: bool = False,
             seed_range: int = 100,
             logger=None,
+            single_prompt: str | None = None,
 
             # --- text-only / ОДИН ФАЙЛ ---
             text_only_repo_id: str | None = None,
@@ -171,6 +172,7 @@ class DatasetWrapper(Dataset):
         self.use_one = use_one
         self.seed_range = seed_range
         self.logger = logger or logging.getLogger(__name__)
+        self.single_prompt = single_prompt
 
         self.image_column = image_column if load_images else None
         self.images_path = Path(images_path) if (images_path and load_images) else None
@@ -356,7 +358,7 @@ class DatasetWrapper(Dataset):
             base_ind //= self.images_per_row
 
         if self.use_one:
-            caption = "girl in red coat on a rainy neon street, night, cinematic, highly detailed"
+            caption = self.single_prompt or "girl in red coat on a rainy neon street, night, cinematic, highly detailed"
         else:
             caption = self._get_caption(base_ind)
 

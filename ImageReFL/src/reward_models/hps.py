@@ -46,6 +46,7 @@ class HPS(BaseModel):
 
         checkpoint = torch.load(cp, map_location=device)
         model.load_state_dict(checkpoint["state_dict"])
+        model.eval()
 
         tokenizer = img_score.get_tokenizer(PROCESSOR_NAME)
 

@@ -11,6 +11,7 @@ train:
   all_models_with_tokenizer: ${models.with_tokenizer}
   use_one: true
   seed_range: 0
+  single_prompt: null
 
 test:
   _target_: src.datasets.dataset.DatasetWrapper
@@ -25,3 +26,4 @@ test:
   all_models_with_tokenizer: ${models.with_tokenizer}
   use_one: true
   seed_range: 10000
+  single_prompt: null

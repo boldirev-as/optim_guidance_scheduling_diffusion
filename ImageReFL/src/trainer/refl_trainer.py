@@ -24,6 +24,7 @@ class ReFLTrainer(BaseTrainer):
             if self.is_train
             else self.cfg_trainer.max_mid_timestep - 1
         )
+        batch["mid_timestep"] = mid_timestep
 
         with torch.no_grad():
             latents, encoder_hidden_states = self.model.do_k_diffusion_steps(
@@ -63,6 +64,7 @@ class ReFLTrainer(BaseTrainer):
             if self.is_train
             else self.cfg_trainer.max_mid_timestep - 1
         )
+        batch["mid_timestep"] = mid_timestep
 
         with torch.no_grad():
             latents, encoder_hidden_states = self.model.do_k_diffusion_steps(
