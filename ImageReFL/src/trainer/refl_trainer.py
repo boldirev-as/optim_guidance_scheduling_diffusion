@@ -14,6 +14,8 @@ class ReFLTrainer(BaseTrainer):
     """
 
     def _sample_image_train(self, batch: dict[str, torch.Tensor]):
+        batch["guidance_min_step"] = self.cfg_trainer.min_mid_timestep
+        batch["guidance_max_step"] = self.cfg_trainer.max_mid_timestep
         self.model.set_timesteps(self.cfg_trainer.max_mid_timestep, device=self.device)
 
         mid_timestep = (
@@ -54,6 +56,8 @@ class ReFLTrainer(BaseTrainer):
         # print("loss guidance", batch["loss"])
 
     def _sample_image_eval(self, batch: dict[str, torch.Tensor]):
+        batch["guidance_min_step"] = self.cfg_trainer.min_mid_timestep
+        batch["guidance_max_step"] = self.cfg_trainer.max_mid_timestep
         self.model.set_timesteps(self.cfg_trainer.max_mid_timestep, device=self.device)
 
         mid_timestep = (

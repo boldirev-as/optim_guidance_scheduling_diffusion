@@ -16,7 +16,6 @@ model:
   guidance_delta_scale: 2.0
   guidance_omega_min: 2.0
   guidance_omega_max: 12.0
-  guidance_last_k_steps: 10
 trainer:
   type: 'ReFL'
   loss_scale: 10

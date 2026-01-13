@@ -554,11 +554,6 @@ class BaseTrainer:
         return base.format(current, total, 100.0 * current / total)
 
     def _log_batch(self, batch_idx, batch, mode="train"):
-
-        guidance_scales = self.model.omegas_history
-
-        print(mode, guidance_scales)
-
         if self.writer is not None:
             if "mid_timestep" in batch:
                 self.writer.add_scalar(f"{mode}_mid_timestep", float(batch["mid_timestep"]))
@@ -589,7 +584,11 @@ class BaseTrainer:
             if tokenized is not None:
                 base_tokens = tokenized[:1].to(self.device)
                 for seed in seeds:
-                    schedule_batch = {DatasetColumns.tokenized_text.name: base_tokens}
+                    schedule_batch = {
+                        DatasetColumns.tokenized_text.name: base_tokens,
+                        "guidance_min_step": self.cfg_trainer.min_mid_timestep,
+                        "guidance_max_step": self.cfg_trainer.max_mid_timestep,
+                    }
                     with torch.no_grad():
                         self.model.set_timesteps(self.cfg_trainer.max_mid_timestep, device=self.device)
                         self.model.do_k_diffusion_steps(

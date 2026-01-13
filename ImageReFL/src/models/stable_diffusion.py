@@ -154,7 +154,6 @@ class StableDiffusion(BaseModel):
             guidance_delta_scale: float = 1.0,
             guidance_omega_min: float | None = None,
             guidance_omega_max: float | None = None,
-            guidance_last_k_steps: int | None = None,
             use_ema: bool = False,
             use_lora: bool = False,
             lora_rank: int | None = None,
@@ -253,7 +252,6 @@ class StableDiffusion(BaseModel):
         self.text_encoder.requires_grad_(False)
 
         self.guidance_scale = guidance_scale
-        self.guidance_last_k_steps = guidance_last_k_steps
         self.resolution = 512
         self.use_image_shifting = use_image_shifting
 
@@ -493,11 +491,9 @@ class StableDiffusion(BaseModel):
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
 
             if self.guidance_net is not None and self.do_guidance_w_loss:
-                if self.guidance_last_k_steps is None:
-                    use_guidance_net = True
-                else:
-                    last_k_start = max(0, len(self.timesteps) - self.guidance_last_k_steps)
-                    use_guidance_net = timestep_index >= last_k_start
+                min_step = batch.get("guidance_min_step", 0)
+                max_step = batch.get("guidance_max_step", len(self.timesteps))
+                use_guidance_net = min_step <= timestep_index < max_step
 
                 if use_guidance_net:
 
