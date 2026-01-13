@@ -8,16 +8,17 @@ defaults:
   - _self_
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 1e-4
+  lr: 3e-4
 lr_scheduler: null
 model:
   do_guidance_w_loss: True
   no_grad: True
+  guidance_delta_scale: 10.0
 trainer:
   type: 'ReFL'
-  loss_scale: 20
+  loss_scale: 80
   max_grad_norm: 1
-  accumulation_steps: 8
+  accumulation_steps: 4
   min_mid_timestep: 32
   max_mid_timestep: 36
   log_step: 2

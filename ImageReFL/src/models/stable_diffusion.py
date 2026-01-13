@@ -26,6 +26,7 @@ class GuidanceNet(nn.Module):
             time_emb_dim: int = 32,  # фактический dim возьми из UNet.time_embedding.linear_2.out_features
             hidden_dim: int = 512,
             base_scale: float = 7.5,
+            delta_scale: float = 1.0,
             pad_id: int | None = None,
             bos_id: int | None = None,
             eos_id: int | None = None,
@@ -33,6 +34,7 @@ class GuidanceNet(nn.Module):
     ):
         super().__init__()
         self.base_scale = base_scale
+        self.delta_scale = delta_scale
         self.pad_id, self.bos_id, self.eos_id = pad_id, bos_id, eos_id
         self.use_attn_pool = use_attn_pool
 
@@ -127,7 +129,7 @@ class GuidanceNet(nn.Module):
 
         x = torch.cat([cond_embed, emb], dim=-1)
         delta = self.mlp(x)
-        omega = self.base_scale + delta
+        omega = self.base_scale + self.delta_scale * delta
         return omega
 
 
@@ -143,6 +145,7 @@ class StableDiffusion(BaseModel):
             revision: str | None = None,
             noise_scheduler: SchedulerMixin | None = None,
             guidance_scale: float = 7.5,
+            guidance_delta_scale: float = 1.0,
             use_ema: bool = False,
             use_lora: bool = False,
             lora_rank: int | None = None,
@@ -259,6 +262,7 @@ class StableDiffusion(BaseModel):
             cond_dim=self.text_encoder.config.hidden_size,
             time_emb_dim=self.unet.time_embedding.linear_2.out_features,
             base_scale=self.guidance_scale,
+            delta_scale=guidance_delta_scale,
             pad_id=getattr(self.tokenizer, "pad_token_id", None),
             bos_id=getattr(self.tokenizer, "bos_token_id", None),
             eos_id=getattr(self.tokenizer, "eos_token_id", None),
