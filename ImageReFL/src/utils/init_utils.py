@@ -150,6 +150,13 @@ def setup_saving_and_logging(config):
         logger (Logger): logger that logs output.
     """
     save_dir = ROOT_PATH / config.trainer.save_dir / config.writer.run_name
+
+    if not config.trainer.get("save_checkpoints", True):
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger("train")
+        logger.setLevel(logging.DEBUG)
+        return logger
+
     saving_init(save_dir, config)
 
     if config.trainer.get("resume_from") is not None:
