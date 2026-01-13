@@ -154,6 +154,7 @@ class StableDiffusion(BaseModel):
             guidance_delta_scale: float = 1.0,
             guidance_omega_min: float | None = None,
             guidance_omega_max: float | None = None,
+            guidance_last_k_steps: int | None = None,
             use_ema: bool = False,
             use_lora: bool = False,
             lora_rank: int | None = None,
@@ -252,6 +253,7 @@ class StableDiffusion(BaseModel):
         self.text_encoder.requires_grad_(False)
 
         self.guidance_scale = guidance_scale
+        self.guidance_last_k_steps = guidance_last_k_steps
         self.resolution = 512
         self.use_image_shifting = use_image_shifting
 
@@ -491,8 +493,13 @@ class StableDiffusion(BaseModel):
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
 
             if self.guidance_net is not None and self.do_guidance_w_loss:
-                # TODO: rewove magic number
-                if timestep_index >= 0:
+                if self.guidance_last_k_steps is None:
+                    use_guidance_net = True
+                else:
+                    last_k_start = max(0, len(self.timesteps) - self.guidance_last_k_steps)
+                    use_guidance_net = timestep_index >= last_k_start
+
+                if use_guidance_net:
 
                     batch_size = latents.shape[0]
                     _, latent_model_input_cond = latent_model_input.chunk(2)
@@ -527,7 +534,14 @@ class StableDiffusion(BaseModel):
                         noise_pred = noise_pred_uncond + omega * (noise_pred_text - noise_pred_uncond)
 
                 else:
-                    noise_pred = noise_pred_uncond + 7.5 * (
+                    if self.omega_schedule is not None:
+                        omega_stub = torch.tensor(
+                            [[[[self.guidance_scale]]]],
+                            device=latents.device,
+                            dtype=latents.dtype,
+                        )
+                        self.omega_schedule.append(omega_stub.detach().float().cpu())
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (
                             noise_pred_text - noise_pred_uncond
                     )
             else:
