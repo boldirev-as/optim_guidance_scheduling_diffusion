@@ -8,17 +8,19 @@ defaults:
   - _self_
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 3e-4
+  lr: 1e-4
 lr_scheduler: null
 model:
   do_guidance_w_loss: True
   no_grad: True
-  guidance_delta_scale: 10.0
+  guidance_delta_scale: 2.0
+  guidance_omega_min: 2.0
+  guidance_omega_max: 12.0
 trainer:
   type: 'ReFL'
-  loss_scale: 80
+  loss_scale: 10
   max_grad_norm: 1
-  accumulation_steps: 4
+  accumulation_steps: 8
   min_mid_timestep: 32
   max_mid_timestep: 36
   log_step: 2
@@ -29,6 +31,7 @@ trainer:
   override: False # if True, will override the previous run with the same name
   monitor: "off" # "off" or "max/min metric_name", i.e. our goal is to maximize/minimize metric
   save_period: 5 # checkpoint each save_period epochs in addition to the best epoch
+  save_checkpoints: False
   early_stop: ${trainer.n_epochs} # epochs for early stopping
   save_dir: "refl_guidance_loss_saved/"
   seed: 1
@@ -37,6 +40,8 @@ trainer:
   detach_main_path: False
   calculate_initial_model_metrics: True
   requires_score_grad: True
+  log_guidance_schedule: True
+  guidance_schedule_log_seeds: 3
 dataloader:
   test:
     batch_size: 1

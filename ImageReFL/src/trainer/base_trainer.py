@@ -157,8 +157,9 @@ class BaseTrainer:
         try:
             self._train_process()
         except KeyboardInterrupt as e:
-            self.logger.info("Saving model on keyboard interrupt")
-            self._save_checkpoint(self._last_epoch, save_best=False)
+            if self.cfg_trainer.get("save_checkpoints", True):
+                self.logger.info("Saving model on keyboard interrupt")
+                self._save_checkpoint(self._last_epoch, save_best=False)
             raise e
 
     def _train_process(self):
@@ -172,8 +173,12 @@ class BaseTrainer:
         not_improved_count = 0
 
         if self.cfg_trainer.calculate_initial_model_metrics:
+            init_logs = {"epoch": self.start_epoch - 1}
             for part, dataloader in self.evaluation_dataloaders.items():
-                self._evaluation_epoch(self.start_epoch - 1, part, dataloader)
+                val_logs = self._evaluation_epoch(self.start_epoch - 1, part, dataloader)
+                init_logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
+            for key, value in init_logs.items():
+                self.logger.info(f"    init_{key:11s}: {value}")
 
         for epoch in range(self.start_epoch, self.epochs + 1):
             self._last_epoch = epoch
@@ -192,8 +197,9 @@ class BaseTrainer:
                 logs, not_improved_count
             )
 
-            if epoch % self.save_period == 0 or best:
-                self._save_checkpoint(epoch, save_best=best, only_best=True)
+            if self.cfg_trainer.get("save_checkpoints", True):
+                if epoch % self.save_period == 0 or best:
+                    self._save_checkpoint(epoch, save_best=best, only_best=True)
 
             if stop_process:  # early_stop
                 break
@@ -570,6 +576,35 @@ class BaseTrainer:
                 self.writer.add_scalar(f"{mode}_guidance/omega_std", omegas.std().item())
                 self.writer.add_scalar(f"{mode}_guidance/omega_min", omegas.min().item())
                 self.writer.add_scalar(f"{mode}_guidance/omega_max", omegas.max().item())
+
+        if self.cfg_trainer.get("log_guidance_schedule", False):
+            seeds = batch.get("seeds", [self.cfg_trainer.seed])
+            if isinstance(seeds, (int, float)):
+                seeds = [int(seeds)]
+            if isinstance(seeds, list) and seeds and isinstance(seeds[0], list):
+                seeds = seeds[0]
+            max_seeds = int(self.cfg_trainer.get("guidance_schedule_log_seeds", 3))
+            seeds = [int(s) for s in seeds[:max_seeds]]
+            tokenized = batch.get(DatasetColumns.tokenized_text.name, None)
+            if tokenized is not None:
+                base_tokens = tokenized[:1].to(self.device)
+                for seed in seeds:
+                    schedule_batch = {DatasetColumns.tokenized_text.name: base_tokens}
+                    with torch.no_grad():
+                        self.model.set_timesteps(self.cfg_trainer.max_mid_timestep, device=self.device)
+                        self.model.do_k_diffusion_steps(
+                            latents=None,
+                            start_timestep_index=0,
+                            end_timestep_index=self.cfg_trainer.max_mid_timestep,
+                            batch=schedule_batch,
+                            return_pred_original=False,
+                            do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
+                            seed=seed,
+                        )
+                    omega_list = [float(x[0].item()) for x in self.model.omega_schedule]
+                    self.logger.info(
+                        f"{mode}_guidance_schedule_seed_{seed}: {omega_list}"
+                    )
 
         # for i, guidance_scale in enumerate(guidance_scales):
         #     self.writer.add_scalar(

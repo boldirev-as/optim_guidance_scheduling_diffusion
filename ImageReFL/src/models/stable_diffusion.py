@@ -27,6 +27,8 @@ class GuidanceNet(nn.Module):
             hidden_dim: int = 512,
             base_scale: float = 7.5,
             delta_scale: float = 1.0,
+            omega_min: float | None = None,
+            omega_max: float | None = None,
             pad_id: int | None = None,
             bos_id: int | None = None,
             eos_id: int | None = None,
@@ -35,6 +37,8 @@ class GuidanceNet(nn.Module):
         super().__init__()
         self.base_scale = base_scale
         self.delta_scale = delta_scale
+        self.omega_min = omega_min
+        self.omega_max = omega_max
         self.pad_id, self.bos_id, self.eos_id = pad_id, bos_id, eos_id
         self.use_attn_pool = use_attn_pool
 
@@ -130,6 +134,8 @@ class GuidanceNet(nn.Module):
         x = torch.cat([cond_embed, emb], dim=-1)
         delta = self.mlp(x)
         omega = self.base_scale + self.delta_scale * delta
+        if self.omega_min is not None or self.omega_max is not None:
+            omega = omega.clamp(min=self.omega_min, max=self.omega_max)
         return omega
 
 
@@ -146,6 +152,8 @@ class StableDiffusion(BaseModel):
             noise_scheduler: SchedulerMixin | None = None,
             guidance_scale: float = 7.5,
             guidance_delta_scale: float = 1.0,
+            guidance_omega_min: float | None = None,
+            guidance_omega_max: float | None = None,
             use_ema: bool = False,
             use_lora: bool = False,
             lora_rank: int | None = None,
@@ -251,6 +259,7 @@ class StableDiffusion(BaseModel):
 
         self.last_omegas = []
         self.omegas_history = deque(maxlen=10)
+        self.omega_schedule: list[torch.Tensor] = []
 
         # if self.do_guidance_w_loss:
 
@@ -263,6 +272,8 @@ class StableDiffusion(BaseModel):
             time_emb_dim=self.unet.time_embedding.linear_2.out_features,
             base_scale=self.guidance_scale,
             delta_scale=guidance_delta_scale,
+            omega_min=guidance_omega_min,
+            omega_max=guidance_omega_max,
             pad_id=getattr(self.tokenizer, "pad_token_id", None),
             bos_id=getattr(self.tokenizer, "bos_token_id", None),
             eos_id=getattr(self.tokenizer, "eos_token_id", None),
@@ -506,6 +517,7 @@ class StableDiffusion(BaseModel):
 
                     self.last_omegas = omega
                     self.omegas_history.append(omega.detach())
+                    self.omega_schedule.append(omega.detach().float().cpu())
 
                     if detach_main_path:
                         noise_pred_uncond = noise_pred_uncond.detach()
@@ -652,6 +664,9 @@ class StableDiffusion(BaseModel):
 
         if latents is None:
             latents = self.get_latents(batch_size=batch_size, device=device, seed=seed)
+
+        if do_classifier_free_guidance and self.do_guidance_w_loss:
+            self.omega_schedule = []
 
         for timestep_index in range(start_timestep_index, end_timestep_index - 1):
             latents, _ = self.predict_next_latents(
