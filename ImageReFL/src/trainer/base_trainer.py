@@ -600,7 +600,12 @@ class BaseTrainer:
                             do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
                             seed=seed,
                         )
-                    omega_list = [float(x[0].item()) for x in self.model.omega_schedule]
+                    min_step = self.cfg_trainer.min_mid_timestep
+                    max_step = self.cfg_trainer.max_mid_timestep
+                    omega_list = [
+                        float(x[0].item())
+                        for x in self.model.omega_schedule[min_step:max_step]
+                    ]
                     self.logger.info(
                         f"{mode}_guidance_schedule_seed_{seed}: {omega_list}"
                     )

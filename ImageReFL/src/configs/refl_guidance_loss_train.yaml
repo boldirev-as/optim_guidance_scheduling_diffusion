@@ -1,6 +1,6 @@
 defaults:
   - model: stable_diffusion_15
-  - reward_models: hps
+  - reward_models: clip_score
   - writer: train
   - datasets: prompt
   - dataloader: refl
@@ -14,8 +14,8 @@ model:
   do_guidance_w_loss: True
   no_grad: True
   guidance_delta_scale: 3.0
-  guidance_omega_min: 2.0
-  guidance_omega_max: 12.0
+  guidance_omega_min: null
+  guidance_omega_max: null
 trainer:
   type: 'ReFL'
   loss_scale: 10
