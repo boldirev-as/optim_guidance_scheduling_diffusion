@@ -13,7 +13,7 @@ lr_scheduler: null
 model:
   do_guidance_w_loss: True
   no_grad: True
-  guidance_delta_scale: 2.0
+  guidance_delta_scale: 3.0
   guidance_omega_min: 2.0
   guidance_omega_max: 12.0
 trainer:
@@ -22,10 +22,10 @@ trainer:
   max_grad_norm: 1
   accumulation_steps: 8
   min_mid_timestep: 32
-  max_mid_timestep: 36
+  max_mid_timestep: 40
   log_step: 2
   n_epochs: 5
-  epoch_len: 10
+  epoch_len: 20
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
   override: False # if True, will override the previous run with the same name
