@@ -50,10 +50,10 @@ class ReFLTrainer(BaseTrainer):
             seed=batch.get("seeds", [None])[0]
         )
 
-        base_scale = 7.5
-        lambda_reg = 0.01
-        # batch["loss"] += lambda_reg * ((self.model.last_omegas - base_scale) ** 2).mean()
-        # print("loss guidance", batch["loss"])
+        lambda_reg = float(self.cfg_trainer.get("guidance_reg_lambda", 0.0))
+        if lambda_reg > 0 and torch.is_tensor(self.model.last_omegas):
+            base_scale = float(self.cfg_trainer.get("guidance_reg_base", 7.5))
+            batch["loss"] += lambda_reg * ((self.model.last_omegas - base_scale) ** 2).mean()
 
     def _sample_image_eval(self, batch: dict[str, torch.Tensor]):
         batch["guidance_min_step"] = self.cfg_trainer.min_mid_timestep
