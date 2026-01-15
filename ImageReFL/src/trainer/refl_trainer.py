@@ -53,7 +53,13 @@ class ReFLTrainer(BaseTrainer):
         lambda_reg = float(self.cfg_trainer.get("guidance_reg_lambda", 0.0))
         if lambda_reg > 0 and torch.is_tensor(self.model.last_omegas):
             base_scale = float(self.cfg_trainer.get("guidance_reg_base", 7.5))
-            batch["loss"] += lambda_reg * ((self.model.last_omegas - base_scale) ** 2).mean()
+            reg_mode = str(self.cfg_trainer.get("guidance_reg_mode", "symmetric"))
+            delta = self.model.last_omegas - base_scale
+            if reg_mode == "upper":
+                reg = (delta.clamp_min(0.0) ** 2).mean()
+            else:
+                reg = (delta ** 2).mean()
+            batch["loss"] += lambda_reg * reg
 
     def _sample_image_eval(self, batch: dict[str, torch.Tensor]):
         batch["guidance_min_step"] = self.cfg_trainer.min_mid_timestep

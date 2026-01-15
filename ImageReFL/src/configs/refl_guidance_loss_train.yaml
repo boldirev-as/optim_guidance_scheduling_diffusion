@@ -40,8 +40,9 @@ trainer:
   detach_main_path: False
   calculate_initial_model_metrics: True
   requires_score_grad: True
-  guidance_reg_lambda: 0.01
+  guidance_reg_lambda: 0.001
   guidance_reg_base: 7.5
+  guidance_reg_mode: "upper"
   log_guidance_schedule: True
   guidance_schedule_log_seeds: 3
 dataloader:
