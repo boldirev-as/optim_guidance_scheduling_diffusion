@@ -57,6 +57,12 @@ class ReFLTrainer(BaseTrainer):
             delta = self.model.last_omegas - base_scale
             if reg_mode == "upper":
                 reg = (delta.clamp_min(0.0) ** 2).mean()
+            elif reg_mode == "band":
+                band_min = float(self.cfg_trainer.get("guidance_reg_min", base_scale))
+                band_max = float(self.cfg_trainer.get("guidance_reg_max", base_scale))
+                below = (band_min - self.model.last_omegas).clamp_min(0.0) ** 2
+                above = (self.model.last_omegas - band_max).clamp_min(0.0) ** 2
+                reg = (below + above).mean()
             else:
                 reg = (delta ** 2).mean()
             batch["loss"] += lambda_reg * reg

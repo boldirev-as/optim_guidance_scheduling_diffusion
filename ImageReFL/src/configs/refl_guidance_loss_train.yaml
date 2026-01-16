@@ -2,7 +2,7 @@ defaults:
   - model: stable_diffusion_15
   - reward_models: clip_score
   - writer: train
-  - datasets: prompt
+  - datasets: coco_prompts
   - dataloader: refl
   - transforms: empty
   - _self_
@@ -42,14 +42,11 @@ trainer:
   requires_score_grad: True
   guidance_reg_lambda: 0.001
   guidance_reg_base: 7.5
-  guidance_reg_mode: "upper"
+  guidance_reg_mode: "band"
+  guidance_reg_min: 7.2
+  guidance_reg_max: 8.5
   log_guidance_schedule: True
   guidance_schedule_log_seeds: 3
 dataloader:
   test:
     batch_size: 1
-datasets:
-  train:
-    single_prompt: "girl in red coat on a rainy neon street, night, cinematic, highly detailed"
-  test:
-    single_prompt: "girl in red coat on a rainy neon street, night, cinematic, highly detailed"
