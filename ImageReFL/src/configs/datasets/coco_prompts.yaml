@@ -15,7 +15,7 @@ train:
 
   text_column: captions
 
-  load_images: true
+  load_images: false
   dataset_name: phiyodr/coco2017
   dataset_split: train
 
