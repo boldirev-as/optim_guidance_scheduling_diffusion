@@ -46,3 +46,8 @@ trainer:
 dataloader:
   test:
     batch_size: 1
+datasets:
+  train:
+    fixed_length: 1000
+  test:
+    fixed_length: 200
