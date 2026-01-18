@@ -14,8 +14,8 @@ class SelfConsistencyTrainer(BaseTrainer):
     def _st_indices(self, n, device):
         s_max = 1.0 - self.eps_margin
         s = torch.rand(1, device=device) * (s_max - self.s_min) + self.s_min
-        t = torch.clamp(s - self.delta_min, 0.0, 1.0)
-        to_idx = lambda x: int((n - 1) * float(x.clamp(0, 1)))
+        t = torch.clamp(s + self.delta_min, 0.0, 1.0)
+        to_idx = lambda x: int((n - 1) * float((1.0 - x).clamp(0, 1)))
         t_idx = to_idx(t)
         s_idx = max(t_idx + 1, to_idx(s))
         s_idx = min(s_idx, n - 1)
@@ -30,7 +30,6 @@ class SelfConsistencyTrainer(BaseTrainer):
     def _ensure_x0_latents(self, batch, device):
         img = batch[DatasetColumns.original_image.name]
         img = img.to(device=device, dtype=torch.float32)
-        img = img * 2.0 - 1.0
         with torch.no_grad():
             enc_out = self.model.vae.encode(img)
             x0 = enc_out.latent_dist.sample()
@@ -44,20 +43,17 @@ class SelfConsistencyTrainer(BaseTrainer):
         t_idx, s_idx = self._st_indices(self.cfg_trainer.max_mid_timestep, device)
 
         with torch.no_grad():
-            _, enc = self.model.do_k_diffusion_steps(
-                latents=None,
-                start_timestep_index=0,
-                end_timestep_index=0,
+            enc = self.model.get_encoder_hidden_states(
                 batch=batch,
-                return_pred_original=False,
                 do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
-                seed=batch.get("seeds", [None])[0],
             )
 
         x0 = self._ensure_x0_latents(batch, device)
         a = self.model.noise_scheduler.alphas_cumprod.to(device)
-        xt = self._q_sample(x0, a[t_idx])
-        xs = self._q_sample(x0, a[s_idx])
+        t_id = int(self.model.timesteps[t_idx])
+        s_id = int(self.model.timesteps[s_idx])
+        xt = self._q_sample(x0, a[t_id])
+        xs = self._q_sample(x0, a[s_id])
 
         x_s, _ = self.model.do_k_diffusion_steps(
             latents=xt,

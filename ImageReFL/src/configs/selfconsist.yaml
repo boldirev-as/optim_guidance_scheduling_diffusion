@@ -2,7 +2,7 @@ defaults:
   - model: stable_diffusion_15
   - reward_models: clip_score
   - writer: train
-  - datasets: coco_prompts
+  - datasets: coco_image_prompts
   - dataloader: refl
   - transforms: empty
   - _self_
@@ -13,6 +13,10 @@ lr_scheduler: null
 model:
   do_guidance_w_loss: True
   no_grad: True
+  noise_scheduler:
+    _target_: diffusers.DDIMScheduler.from_pretrained
+    pretrained_model_name_or_path: ${model.pretrained_model_name}
+    subfolder: scheduler
 trainer:
   type: 'SelfConsistency'
   loss_scale: 1

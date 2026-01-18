@@ -22,4 +22,4 @@ export HYDRA_FULL_ERROR=1
 
 unset http_proxy HTTPS_PROXY HTTP_PROXY https_proxy ALL_PROXY all_proxy
 
-srun python train.py --config-name refl_guidance_loss_train
+srun python train.py --config-name selfconsist
