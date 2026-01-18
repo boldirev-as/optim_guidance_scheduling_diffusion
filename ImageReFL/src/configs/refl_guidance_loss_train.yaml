@@ -13,12 +13,12 @@ lr_scheduler: null
 model:
   do_guidance_w_loss: True
   no_grad: True
-  guidance_delta_scale: 3.0
+  guidance_delta_scale: 5.0
   guidance_omega_min: null
   guidance_omega_max: null
 trainer:
   type: 'ReFL'
-  loss_scale: 10
+  loss_scale: 20
   max_grad_norm: 1
   accumulation_steps: 8
   min_mid_timestep: 32
