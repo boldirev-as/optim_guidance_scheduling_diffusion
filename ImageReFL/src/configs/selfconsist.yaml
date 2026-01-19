@@ -26,7 +26,7 @@ trainer:
   max_mid_timestep: 36
   log_step: 2
   n_epochs: 20
-  epoch_len: 5
+  epoch_len: null
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
   override: False # if True, will override the previous run with the same name
