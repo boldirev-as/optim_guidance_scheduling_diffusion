@@ -2,7 +2,7 @@ defaults:
   - model: stable_diffusion_15
   - reward_models: clip_score
   - writer: train
-  - datasets: coco_image_prompts
+  - datasets: coco_image_prompts_eval
   - dataloader: refl
   - transforms: empty
   - _self_
@@ -24,6 +24,9 @@ trainer:
   accumulation_steps: 16
   min_mid_timestep: 32
   max_mid_timestep: 36
+  s_min: 0.01
+  delta_min: 0.2
+  eps_margin: 0.01
   log_step: 2
   n_epochs: 20
   epoch_len: null

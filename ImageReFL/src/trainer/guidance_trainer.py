@@ -7,9 +7,9 @@ from src.constants.dataset import DatasetColumns
 class SelfConsistencyTrainer(BaseTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.s_min = 0.20
-        self.eps_margin = 0.01
-        self.delta_min = 0.05
+        self.s_min = float(self.cfg_trainer.get("s_min", 0.2))
+        self.eps_margin = float(self.cfg_trainer.get("eps_margin", 0.01))
+        self.delta_min = float(self.cfg_trainer.get("delta_min", 0.05))
 
     def _st_indices(self, n, device):
         s_max = 1.0 - self.eps_margin
