@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 import datasets
+import urllib.request
 from datasets import IterableDataset
 from huggingface_hub import hf_hub_download
 
@@ -339,7 +340,17 @@ class DatasetWrapper(Dataset):
             img = data_dict[self.image_column][image_index].convert("RGB")
         else:
             col = self.image_column or "image"
-            img = data_dict[col].convert("RGB")
+            val = data_dict[col]
+            if val is None:
+                raise RuntimeError(f"Image column '{col}' is None for index {ind}")
+            if isinstance(val, str):
+                if val.startswith("http://") or val.startswith("https://"):
+                    with urllib.request.urlopen(val) as resp:
+                        img = Image.open(resp).convert("RGB")
+                else:
+                    img = Image.open(val).convert("RGB")
+            else:
+                img = val.convert("RGB")
         return self.image_process(img).unsqueeze(0)
 
     def __getitem__(self, ind) -> dict[str, tp.Any]:

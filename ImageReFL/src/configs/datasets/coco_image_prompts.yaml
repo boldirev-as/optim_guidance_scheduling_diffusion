@@ -11,7 +11,7 @@ train:
   subset_size: null
   subset_seed: 0
 
-  image_column: image
+  image_column: coco_url
 
   images_path: null
   images_per_row: null
