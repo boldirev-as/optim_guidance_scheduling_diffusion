@@ -7,13 +7,14 @@ train:
   dataset_name: phiyodr/coco2017
   dataset_split: train
 
-  subset_percent: 20
-  subset_size: null
+  subset_percent: null
+  subset_size: 1000
   subset_seed: 0
 
   image_column: coco_url
 
-  images_path: null
+  images_path: data/coco2017_subset/images
+  local_image_offset: 0
   images_per_row: null
 
   text_only_file: null
