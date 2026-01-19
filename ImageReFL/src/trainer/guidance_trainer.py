@@ -19,6 +19,9 @@ class SelfConsistencyTrainer(BaseTrainer):
         t_idx = to_idx(t)
         s_idx = max(t_idx + 1, to_idx(s))
         s_idx = min(s_idx, n - 1)
+        t_idx = min(t_idx, n - 2)
+        if s_idx <= t_idx:
+            s_idx = min(t_idx + 1, n - 1)
         return t_idx, s_idx
 
     @staticmethod
@@ -70,6 +73,18 @@ class SelfConsistencyTrainer(BaseTrainer):
         loss = F.mse_loss(x_s, xs)
         # loss = loss + 0.01 * ((self.model.last_omegas - 7.5) ** 2).mean()
         batch["loss"] = loss
+
+        if self.cfg_trainer.get("requires_score_grad", False):
+            batch["image"] = self.model.sample_image(
+                latents=xt,
+                start_timestep_index=t_idx,
+                end_timestep_index=t_idx + 1,
+                encoder_hidden_states=enc,
+                batch=batch,
+                do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
+                detach_main_path=self.cfg_trainer.detach_main_path,
+                seed=batch.get("seeds", [None])[0],
+            )
 
     def _sample_image_eval(self, batch):
         self.model.set_timesteps(self.cfg_trainer.max_mid_timestep, device=self.device)

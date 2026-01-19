@@ -40,4 +40,8 @@ trainer:
   do_classifier_free_guidance: True
   detach_main_path: True
   calculate_initial_model_metrics: False
-  requires_score_grad: False
+  requires_score_grad: True
+reward_models:
+  train_model:
+    reward_scale_factor: 0.1
+    reward_offset: 0.0

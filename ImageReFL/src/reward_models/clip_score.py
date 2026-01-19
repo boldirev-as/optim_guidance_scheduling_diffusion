@@ -12,9 +12,16 @@ MODEL_SUFFIX = "ClipScore"
 
 
 class ClipScore(BaseModel):
-    def __init__(self, device: torch.device):
+    def __init__(
+            self,
+            device: torch.device,
+            reward_scale_factor: float = 1.0,
+            reward_offset: float = 0.0
+    ):
         super().__init__(
-            model_suffix=MODEL_SUFFIX, reward_scale_factor=1, reward_offset=0
+            model_suffix=MODEL_SUFFIX,
+            reward_scale_factor=reward_scale_factor,
+            reward_offset=reward_offset
         )
 
         model, transform = clip.load(MODEL_NAME, device=device, jit=False)
