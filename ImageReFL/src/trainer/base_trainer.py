@@ -351,10 +351,14 @@ class BaseTrainer:
                     break
         logs = last_train_metrics
 
+        eval_period = int(self.cfg_trainer.get("eval_period", 1))
+        if eval_period <= 0:
+            eval_period = 1
         # Run val/test
-        for part, dataloader in self.evaluation_dataloaders.items():
-            val_logs = self._evaluation_epoch(epoch, part, dataloader)
-            logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
+        if epoch % eval_period == 0:
+            for part, dataloader in self.evaluation_dataloaders.items():
+                val_logs = self._evaluation_epoch(epoch, part, dataloader)
+                logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
 
         return logs
 
