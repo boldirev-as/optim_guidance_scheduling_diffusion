@@ -7,14 +7,20 @@ from src.constants.dataset import DatasetColumns
 class SelfConsistencyTrainer(BaseTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.s_min = float(self.cfg_trainer.get("s_min", 0.2))
-        self.eps_margin = float(self.cfg_trainer.get("eps_margin", 0.01))
-        self.delta_min = float(self.cfg_trainer.get("delta_min", 0.05))
+        self.s_min = float(self.cfg_trainer.get("s_min", 0.01))
+        self.zeta = float(self.cfg_trainer.get("zeta", self.cfg_trainer.get("eps_margin", 1e-2)))
+        self.delta = float(self.cfg_trainer.get("delta", self.cfg_trainer.get("delta_min", 0.2)))
 
     def _st_indices(self, n, device):
-        s_max = 1.0 - self.eps_margin
+        s_max = 1.0 - self.zeta - self.delta
+        if s_max <= self.s_min:
+            s_max = self.s_min + 1e-6
         s = torch.rand(1, device=device) * (s_max - self.s_min) + self.s_min
-        t = torch.clamp(s + self.delta_min, 0.0, 1.0)
+        delta_max = 1.0 - self.zeta - s
+        if delta_max <= self.delta:
+            delta_max = self.delta + 1e-6
+        delta_t = torch.rand(1, device=device) * (delta_max - self.delta) + self.delta
+        t = s + delta_t
         to_idx = lambda x: int((n - 1) * float((1.0 - x).clamp(0, 1)))
         t_idx = to_idx(t)
         s_idx = max(t_idx + 1, to_idx(s))

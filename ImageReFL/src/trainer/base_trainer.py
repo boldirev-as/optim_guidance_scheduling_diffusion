@@ -115,6 +115,7 @@ class BaseTrainer:
         self.train_metrics = MetricTracker(
             *self.train_loss_names,
             "grad_norm",
+            "guidance_grad_norm",
             writer=self.writer,
         )
         self.evaluation_metrics = MetricTracker(
@@ -319,7 +320,9 @@ class BaseTrainer:
                 if self.lr_scheduler is not None:
                     self.lr_scheduler.step()
 
-                self.train_metrics.update("grad_norm", self._get_grad_norm())
+                grad_norm = self._get_grad_norm()
+                self.train_metrics.update("grad_norm", grad_norm)
+                self.train_metrics.update("guidance_grad_norm", grad_norm)
 
                 self.optimizer.zero_grad()
 
@@ -575,6 +578,14 @@ class BaseTrainer:
                 self.writer.add_scalar(f"{mode}_guidance/omega_std", omegas.std().item())
                 self.writer.add_scalar(f"{mode}_guidance/omega_min", omegas.min().item())
                 self.writer.add_scalar(f"{mode}_guidance/omega_max", omegas.max().item())
+            for key, value in batch.items():
+                if not key.endswith(("_clipped_mean", "_clipped_min", "_clipped_max")):
+                    continue
+                if torch.is_tensor(value):
+                    scalar_value = value.float().mean().item()
+                else:
+                    scalar_value = float(value)
+                self.writer.add_scalar(f"{mode}_{key}", scalar_value)
 
         if self.cfg_trainer.get("log_guidance_schedule", False):
             seeds = batch.get("seeds", [self.cfg_trainer.seed])

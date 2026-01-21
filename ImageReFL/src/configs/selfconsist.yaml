@@ -22,15 +22,14 @@ trainer:
   loss_scale: 1
   max_grad_norm: 1
   accumulation_steps: 16
-  min_mid_timestep: 32
-  max_mid_timestep: 36
+  max_mid_timestep: 40
   s_min: 0.01
-  delta_min: 0.2
-  eps_margin: 0.01
+  delta: 0.2
+  zeta: 0.01
   eval_period: 2
   log_step: 2
   n_epochs: 20
-  epoch_len: null
+  epoch_len: 50
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
   override: False # if True, will override the previous run with the same name

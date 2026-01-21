@@ -16,12 +16,16 @@ class ClipScore(BaseModel):
             self,
             device: torch.device,
             reward_scale_factor: float = 1.0,
-            reward_offset: float = 0.0
+            reward_offset: float = 0.0,
+            reward_clip_min: float | None = None,
+            reward_clip_max: float | None = None,
     ):
         super().__init__(
             model_suffix=MODEL_SUFFIX,
             reward_scale_factor=reward_scale_factor,
-            reward_offset=reward_offset
+            reward_offset=reward_offset,
+            reward_clip_min=reward_clip_min,
+            reward_clip_max=reward_clip_max,
         )
 
         model, transform = clip.load(MODEL_NAME, device=device, jit=False)
