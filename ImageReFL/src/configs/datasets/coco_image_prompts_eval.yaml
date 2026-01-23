@@ -8,7 +8,7 @@ train:
   dataset_split: train
 
   subset_percent: null
-  subset_size: 5000
+  subset_size: 20000
   subset_seed: 0
 
   image_column: coco_url

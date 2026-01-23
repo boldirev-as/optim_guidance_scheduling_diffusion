@@ -22,9 +22,9 @@ trainer:
   loss_scale: 1
   max_grad_norm: 1
   accumulation_steps: 16
-  max_mid_timestep: 40
+  max_mid_timestep: 60
   s_min: 0.01
-  delta: 0.2
+  delta: 0.1
   zeta: 0.01
   eval_period: 2
   log_step: 2
@@ -46,5 +46,7 @@ trainer:
   requires_score_grad: True
 reward_models:
   train_model:
-    reward_scale_factor: 0.1
+    reward_scale_factor: 0.2
     reward_offset: 0.0
+    reward_clip_min: -2.0
+    reward_clip_max: 2.0
