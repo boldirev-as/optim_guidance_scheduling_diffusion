@@ -46,7 +46,5 @@ trainer:
   requires_score_grad: True
 reward_models:
   train_model:
-    reward_scale_factor: 0.2
+    reward_scale_factor: 0.1
     reward_offset: 0.0
-    reward_clip_min: -2.0
-    reward_clip_max: 2.0
