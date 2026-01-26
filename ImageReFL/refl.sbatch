@@ -3,7 +3,7 @@
 #SBATCH --gpus=1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=20:00:00
+#SBATCH --time=60:00:00
 #SBATCH --constraint="type_a|type_b|type_c"
 #SBATCH --output="exp/refl_%j.out"
 #SBATCH --export=ALL

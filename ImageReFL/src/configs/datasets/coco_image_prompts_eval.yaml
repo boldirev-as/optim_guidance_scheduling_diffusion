@@ -35,4 +35,4 @@ test:
   text_only_field: null
   text_only_streaming: false
   all_models_with_tokenizer: ${models.with_tokenizer}
-  fixed_length: 400
+  fixed_length: 1000
