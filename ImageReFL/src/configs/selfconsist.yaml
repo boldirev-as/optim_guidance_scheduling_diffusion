@@ -26,7 +26,7 @@ trainer:
   loss_scale: 1
   max_grad_norm: 1
   accumulation_steps: 256
-  num_steps: 64
+  num_steps: 32
   s_min: 0.01
   delta: 0.2
   zeta: 0.01
