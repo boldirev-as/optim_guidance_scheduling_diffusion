@@ -30,7 +30,7 @@ trainer:
   s_min: 0.01
   delta: 0.2
   zeta: 0.01
-  m: 4
+  m: 2
   beta: 1.75
   lambda_sc: 1.0
   eval_period: 2
