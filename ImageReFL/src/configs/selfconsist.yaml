@@ -8,11 +8,15 @@ defaults:
   - _self_
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 5e-5
+  lr: 8e-5
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.01
 lr_scheduler: null
 model:
   do_guidance_w_loss: True
   no_grad: True
+  negative_prompt: "blurred, blurry, disfigured, ugly, tiling, poorly drawn"
   noise_scheduler:
     _target_: diffusers.DDIMScheduler.from_pretrained
     pretrained_model_name_or_path: ${model.pretrained_model_name}
@@ -21,11 +25,14 @@ trainer:
   type: 'SelfConsistency'
   loss_scale: 1
   max_grad_norm: 1
-  accumulation_steps: 16
-  max_mid_timestep: 40
+  accumulation_steps: 256
+  num_steps: 64
   s_min: 0.01
   delta: 0.2
   zeta: 0.01
+  m: 4
+  beta: 1.75
+  lambda_sc: 1.0
   eval_period: 2
   log_step: 2
   n_epochs: 20
@@ -46,5 +53,5 @@ trainer:
   requires_score_grad: True
 reward_models:
   train_model:
-    reward_scale_factor: 0.1
+    reward_scale_factor: 100000.0
     reward_offset: 0.0

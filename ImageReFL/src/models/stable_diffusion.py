@@ -154,6 +154,7 @@ class StableDiffusion(BaseModel):
             guidance_delta_scale: float = 1.0,
             guidance_omega_min: float | None = None,
             guidance_omega_max: float | None = None,
+            negative_prompt: str = "",
             use_ema: bool = False,
             use_lora: bool = False,
             lora_rank: int | None = None,
@@ -254,6 +255,7 @@ class StableDiffusion(BaseModel):
         self.guidance_scale = guidance_scale
         self.resolution = 512
         self.use_image_shifting = use_image_shifting
+        self.negative_prompt = negative_prompt
 
         self.do_guidance_w_loss = do_guidance_w_loss
 
@@ -383,7 +385,7 @@ class StableDiffusion(BaseModel):
 
     def _get_negative_prompts(self, batch_size: int) -> torch.Tensor:
         return self.tokenizer(
-            [""] * batch_size,
+            [self.negative_prompt] * batch_size,
             max_length=self.tokenizer.model_max_length,
             padding="max_length",
             truncation=True,
@@ -566,9 +568,14 @@ class StableDiffusion(BaseModel):
             torch.Tensor: latent prediction
         """
         timestep = self.timesteps[timestep_index]
-        sample = self.noise_scheduler.step(
-            model_output=noise_pred, timestep=timestep, sample=latents
-        )
+        try:
+            sample = self.noise_scheduler.step(
+                model_output=noise_pred, timestep=timestep, sample=latents, eta=0.0
+            )
+        except TypeError:
+            sample = self.noise_scheduler.step(
+                model_output=noise_pred, timestep=timestep, sample=latents
+            )
         return (
             sample.pred_original_sample if return_pred_original else sample.prev_sample
         )
