@@ -36,7 +36,7 @@ trainer:
   eval_period: 2
   log_step: 2
   n_epochs: 20
-  epoch_len: 50
+  epoch_len: 5
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
   override: False # if True, will override the previous run with the same name
