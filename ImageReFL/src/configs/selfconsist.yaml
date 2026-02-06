@@ -35,22 +35,32 @@ trainer:
   lambda_sc: 1.0
   eval_period: 2
   log_step: 2
-  n_epochs: 20
+  n_epochs: 40
   epoch_len: 5
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
   override: False # if True, will override the previous run with the same name
   monitor: "off" # "off" or "max/min metric_name", i.e. our goal is to maximize/minimize metric
-  save_period: 5 # checkpoint each save_period epochs in addition to the best epoch
-  save_checkpoints: False
+  save_period: 2 # checkpoint each save_period epochs in addition to the best epoch
+  save_checkpoints: True
   early_stop: ${trainer.n_epochs} # epochs for early stopping
   save_dir: "refl_guidance_loss_saved/"
   seed: 1
   mse_loss_scale: 0
   do_classifier_free_guidance: True
   detach_main_path: True
-  calculate_initial_model_metrics: False
+  calculate_initial_model_metrics: True
   requires_score_grad: True
+  log_fixed_prompt: True
+  fixed_prompts:
+    - "a photo of a golden retriever sitting on a blue chair, studio lighting"
+    - "a bowl of ramen on a wooden table, top-down, soft natural light"
+    - "a red bicycle leaning against a brick wall, sunny day, 35mm photo"
+    - "a cozy living room with a fireplace and bookshelves, warm lighting"
+    - "a close-up portrait of a woman wearing a red scarf, shallow depth of field"
+  fixed_prompt_seed: 123
+  leak_check_max_samples: 2000
+  leak_check_action: "warn"
 reward_models:
   train_model:
     reward_scale_factor: 100000.0

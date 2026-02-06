@@ -142,7 +142,7 @@ class SelfConsistencyTrainer(BaseTrainer):
 
     def _sample_image_eval(self, batch):
         self.model.set_timesteps(self.num_steps, device=self.device)
-        batch["image"] = self.model.sample_image(
+        reward_image, raw_image = self.model.sample_image_with_raw(
             latents=None,
             start_timestep_index=0,
             end_timestep_index=self.num_steps,
@@ -151,3 +151,5 @@ class SelfConsistencyTrainer(BaseTrainer):
             detach_main_path=self.cfg_trainer.detach_main_path,
             seed=batch.get("seeds", [None])[0],
         )
+        batch["image"] = reward_image
+        batch["raw_image"] = raw_image

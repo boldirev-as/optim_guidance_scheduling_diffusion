@@ -3,7 +3,7 @@
 #SBATCH --gpus=1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=60:00:00
+#SBATCH --time=120:00:00
 #SBATCH --output="exp/refl_%j.out"
 #SBATCH --export=ALL
 

@@ -768,6 +768,37 @@ class StableDiffusion(BaseModel):
         raw_image = self.vae.decode(pred_original_sample).sample
         return self.get_reward_image(raw_image)
 
+    def sample_image_with_raw(
+            self,
+            latents: torch.Tensor | None,
+            start_timestep_index: int,
+            end_timestep_index: int,
+            batch: dict[str, torch.Tensor],
+            encoder_hidden_states: torch.Tensor | None = None,
+            do_classifier_free_guidance: bool = False,
+            detach_main_path: bool = False,
+            seed: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Generates a reward image sample and returns the raw decoded image.
+        """
+        pred_original_sample, _ = self.do_k_diffusion_steps(
+            latents=latents,
+            start_timestep_index=start_timestep_index,
+            end_timestep_index=end_timestep_index,
+            batch=batch,
+            encoder_hidden_states=encoder_hidden_states,
+            return_pred_original=True,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            detach_main_path=detach_main_path,
+            seed=seed
+        )
+
+        pred_original_sample /= self.vae.config.scaling_factor
+        raw_image = self.vae.decode(pred_original_sample).sample
+        reward_image = self.get_reward_image(raw_image)
+        return reward_image, raw_image
+
     def sample_image_inference(
             self,
             latents: torch.Tensor | None,

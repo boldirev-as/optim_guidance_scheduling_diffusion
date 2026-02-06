@@ -73,6 +73,33 @@ def get_dataloaders(config, device: torch.device, all_models_with_tokenizer: lis
         )
         for dataset_partition in config.datasets
     }
+
+    leak_check_max = int(config.trainer.get("leak_check_max_samples", 0))
+    leak_check_action = str(config.trainer.get("leak_check_action", "warn")).lower()
+    if leak_check_max > 0 and "train" in datasets and "test" in datasets:
+        train_ds = datasets["train"]
+        test_ds = datasets["test"]
+
+        def _collect_captions(ds, max_samples):
+            size = min(len(ds), max_samples)
+            captions = set()
+            for idx in range(size):
+                try:
+                    caption = ds._get_caption(idx)
+                except Exception:
+                    break
+                if isinstance(caption, str):
+                    captions.add(caption.strip().lower())
+            return captions
+
+        train_caps = _collect_captions(train_ds, leak_check_max)
+        test_caps = _collect_captions(test_ds, leak_check_max)
+        overlap = train_caps.intersection(test_caps)
+        if overlap:
+            msg = f"Leak check: found {len(overlap)} overlapping captions between train/test in first {leak_check_max} samples."
+            if leak_check_action == "error":
+                raise RuntimeError(msg)
+            logger.warning(msg)
     # dataloaders init
     dataloaders = {}
     for dataset_partition in config.datasets.keys():

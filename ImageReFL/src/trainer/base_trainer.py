@@ -381,6 +381,9 @@ class BaseTrainer:
         if self.model.guidance_net is not None:
             self.model.guidance_net.eval()
         self.evaluation_metrics.reset()
+        for metric in self.val_model_metrics:
+            if hasattr(metric, "reset"):
+                metric.reset()
         with torch.no_grad():
 
             first_batches = []
@@ -403,7 +406,11 @@ class BaseTrainer:
                 for loss_name in self.evaluation_loss_names:
                     self.evaluation_metrics.update(loss_name, batch[loss_name].item())
 
-            for i, metric in enumerate(self.val_model_metrics):
+                for metric in self.val_model_metrics:
+                    if hasattr(metric, "update"):
+                        metric.update(batch=batch, model=self.model)
+
+            for metric in self.val_model_metrics:
                 value = float(metric._get_reward(self.model, self.logger))
                 self.evaluation_metrics.update(metric.model_suffix, value)
 
@@ -412,6 +419,7 @@ class BaseTrainer:
             self._log_batch(
                 batch_idx, collate_fn(first_batches), part
             )
+            self._log_fixed_prompt_images(epoch=epoch, part=part)
 
         return self.evaluation_metrics.result()
 
@@ -652,6 +660,50 @@ class BaseTrainer:
         for metric_name in metric_tracker.keys():
             self.writer.add_scalar(f"{metric_name}", metric_tracker.avg(metric_name))
 
+    @torch.no_grad()
+    def _log_fixed_prompt_images(self, epoch: int, part: str) -> None:
+        if self.writer is None:
+            return
+        if not self.cfg_trainer.get("log_fixed_prompt", False):
+            return
+        fixed_prompts = self.cfg_trainer.get("fixed_prompts", None)
+        if not fixed_prompts:
+            fixed_prompts = self.cfg_trainer.get("fixed_prompt", None)
+        if not fixed_prompts:
+            return
+        if isinstance(fixed_prompts, str):
+            fixed_prompts = [fixed_prompts]
+        seed = int(self.cfg_trainer.get("fixed_prompt_seed", self.cfg_trainer.seed))
+
+        if epoch == self.start_epoch - 1:
+            tag = "init"
+        else:
+            tag = f"epoch_{epoch}"
+
+        for idx, fixed_prompt in enumerate(fixed_prompts, start=1):
+            prompt_batch = self.model.tokenize(fixed_prompt)
+            prompt_batch[DatasetColumns.tokenized_text.name] = prompt_batch[
+                DatasetColumns.tokenized_text.name
+            ].to(self.device)
+            prompt_batch["seeds"] = [seed]
+
+            reward_image, raw_image = self.model.sample_image_with_raw(
+                latents=None,
+                start_timestep_index=0,
+                end_timestep_index=self.cfg_trainer.num_steps,
+                batch=prompt_batch,
+                do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
+                detach_main_path=self.cfg_trainer.detach_main_path,
+                seed=seed,
+            )
+
+            pil_images = self.model.get_pil_image(raw_image)
+            if not pil_images:
+                continue
+
+            name = f"{part}_fixed_prompt/{idx}/{tag}"
+            self.writer.add_image(name, pil_images[0])
+
     def _save_checkpoint(self, epoch, save_best=False, only_best=False):
         """
         Save the checkpoints.
@@ -664,10 +716,13 @@ class BaseTrainer:
                 checkpoint-epochEpochNumber.pth)
         """
         arch = type(self.model).__name__
+        guidance_state = None
+        if self.model.guidance_net is not None:
+            guidance_state = self.model.guidance_net.state_dict()
         state = {
             "arch": arch,
             "epoch": epoch,
-            "state_dict": self.model.state_dict(),
+            "state_dict": guidance_state,
             "optimizer": self.optimizer.state_dict(),
             "lr_scheduler": (
                 self.lr_scheduler.state_dict() if self.lr_scheduler else None
@@ -712,7 +767,15 @@ class BaseTrainer:
                 "Warning: Architecture configuration given in the config file is different from that "
                 "of the checkpoint. This may yield an exception when state_dict is loaded."
             )
-        self.model.load_state_dict(checkpoint["state_dict"])
+        state_dict = checkpoint.get("state_dict")
+        if state_dict is not None and self.model.guidance_net is not None:
+            try:
+                self.model.guidance_net.load_state_dict(state_dict)
+            except RuntimeError:
+                self.logger.warning("GuidanceNet state_dict mismatch, loading full model state_dict.")
+                self.model.load_state_dict(state_dict)
+        elif state_dict is not None:
+            self.model.load_state_dict(state_dict)
 
         # load optimizer state from checkpoint only when optimizer type is not changed.
         if (
@@ -752,6 +815,14 @@ class BaseTrainer:
         checkpoint = torch.load(pretrained_path, self.device)
 
         if checkpoint.get("state_dict") is not None:
-            self.model.load_state_dict(checkpoint["state_dict"])
+            if self.model.guidance_net is not None:
+                try:
+                    self.model.guidance_net.load_state_dict(checkpoint["state_dict"])
+                except RuntimeError:
+                    if hasattr(self, "logger"):
+                        self.logger.warning("GuidanceNet state_dict mismatch, loading full model state_dict.")
+                    self.model.load_state_dict(checkpoint["state_dict"])
+            else:
+                self.model.load_state_dict(checkpoint["state_dict"])
         else:
             self.model.load_state_dict(checkpoint)
