@@ -80,23 +80,43 @@ def get_dataloaders(config, device: torch.device, all_models_with_tokenizer: lis
         train_ds = datasets["train"]
         test_ds = datasets["test"]
 
-        def _collect_captions(ds, max_samples):
+        def _collect_ids_or_captions(ds, max_samples):
             size = min(len(ds), max_samples)
-            captions = set()
+            raw = getattr(ds, "raw_dataset", None)
+            id_column = None
+            if raw is not None:
+                names = getattr(raw, "column_names", [])
+                for candidate in ("image_id", "id"):
+                    if candidate in names:
+                        id_column = candidate
+                        break
+
+            items = set()
             for idx in range(size):
                 try:
+                    if id_column is not None:
+                        sample = raw[idx]
+                        items.add(int(sample[id_column]))
+                        continue
                     caption = ds._get_caption(idx)
                 except Exception:
                     break
                 if isinstance(caption, str):
-                    captions.add(caption.strip().lower())
-            return captions
+                    items.add(caption.strip().lower())
+            return items, ("ids" if id_column is not None else "captions")
 
-        train_caps = _collect_captions(train_ds, leak_check_max)
-        test_caps = _collect_captions(test_ds, leak_check_max)
-        overlap = train_caps.intersection(test_caps)
+        train_items, train_mode = _collect_ids_or_captions(train_ds, leak_check_max)
+        test_items, test_mode = _collect_ids_or_captions(test_ds, leak_check_max)
+        overlap = train_items.intersection(test_items)
         if overlap:
-            msg = f"Leak check: found {len(overlap)} overlapping captions between train/test in first {leak_check_max} samples."
+            if train_mode == test_mode:
+                mode = train_mode
+            else:
+                mode = "mixed"
+            msg = (
+                f"Leak check: found {len(overlap)} overlapping {mode} between train/test "
+                f"in first {leak_check_max} samples."
+            )
             if leak_check_action == "error":
                 raise RuntimeError(msg)
             logger.warning(msg)
