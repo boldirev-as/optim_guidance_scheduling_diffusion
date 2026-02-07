@@ -1,0 +1,68 @@
+defaults:
+  - model: stable_diffusion_15
+  - reward_models: clip_score
+  - writer: train
+  - datasets: coco_image_prompts_smoke
+  - dataloader: refl
+  - transforms: empty
+  - _self_
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 8e-5
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.01
+
+lr_scheduler: null
+
+model:
+  do_guidance_w_loss: True
+  no_grad: True
+  negative_prompt: "blurred, blurry, disfigured, ugly, tiling, poorly drawn"
+  noise_scheduler:
+    _target_: diffusers.DDIMScheduler.from_pretrained
+    pretrained_model_name_or_path: ${model.pretrained_model_name}
+    subfolder: scheduler
+
+trainer:
+  type: 'SelfConsistency'
+  loss_scale: 1
+  max_grad_norm: 1
+  accumulation_steps: 1
+  num_steps: 8
+  s_min: 0.01
+  delta: 0.2
+  zeta: 0.01
+  m: 1
+  beta: 1.75
+  lambda_sc: 1.0
+  eval_period: 1
+  log_step: 1
+  n_epochs: 1
+  epoch_len: 1
+  resume_from: null
+  device: auto
+  override: True
+  monitor: "off"
+  save_period: 1
+  save_checkpoints: False
+  early_stop: ${trainer.n_epochs}
+  save_dir: "refl_guidance_loss_saved/"
+  seed: 1
+  mse_loss_scale: 0
+  do_classifier_free_guidance: True
+  detach_main_path: True
+  calculate_initial_model_metrics: True
+  requires_score_grad: True
+  log_fixed_prompt: False
+  leak_check_max_samples: 100
+  leak_check_action: "warn"
+
+writer:
+  run_name: "refl_smoke_5_5"
+
+reward_models:
+  train_model:
+    reward_scale_factor: 100000.0
+    reward_offset: 0.0

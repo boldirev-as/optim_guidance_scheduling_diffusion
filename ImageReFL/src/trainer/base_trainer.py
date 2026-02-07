@@ -58,6 +58,7 @@ class BaseTrainer:
         self.model = model
         self.train_reward_model = train_reward_model
         self.val_reward_models = val_reward_models
+        self.val_model_metrics: list[Callable[[StableDiffusion], float]] = val_model_metrics or []
 
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -135,8 +136,6 @@ class BaseTrainer:
         if config.trainer.get("from_pretrained") is not None:
             self._from_pretrained(config.trainer.get("from_pretrained"))
 
-        self.val_model_metrics: list[Callable[[StableDiffusion], float]] = val_model_metrics or []
-
         # self.guidance_net = guidance_net
         # self.guidance_net.requires_grad_(True)
 
@@ -148,6 +147,9 @@ class BaseTrainer:
         evaluation_loss_names = [
             reward_model.model_suffix for reward_model in self.val_reward_models
         ]
+        evaluation_loss_names.extend(
+            metric.model_suffix for metric in self.val_model_metrics
+        )
         evaluation_loss_names.append(self.train_reward_model.model_suffix)
         return evaluation_loss_names
 

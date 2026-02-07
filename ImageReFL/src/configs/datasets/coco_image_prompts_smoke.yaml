@@ -1,0 +1,45 @@
+train:
+  _target_: src.datasets.dataset.DatasetWrapper
+
+  text_column: captions
+  load_images: true
+  dataset_name: phiyodr/coco2017
+  dataset_split: train
+
+  subset_percent: null
+  subset_size: 5
+  subset_seed: 0
+
+  image_column: coco_url
+  images_path: data/coco2017_subset/images
+  local_image_offset: 0
+  images_per_row: null
+
+  text_only_file: null
+  text_only_repo_id: null
+  text_only_field: null
+  text_only_streaming: false
+  all_models_with_tokenizer: ${models.with_tokenizer}
+
+test:
+  _target_: src.datasets.dataset.DatasetWrapper
+  text_column: captions
+  load_images: true
+  dataset_name: phiyodr/coco2017
+  dataset_split: validation
+
+  subset_percent: null
+  subset_size: 5
+  subset_seed: 0
+
+  image_column: coco_url
+  images_path: data/coco2017_subset_val/images
+  local_image_offset: 0
+  images_per_row: null
+
+  text_only_file: null
+  text_only_repo_id: null
+  text_only_field: null
+  text_only_streaming: false
+  all_models_with_tokenizer: ${models.with_tokenizer}
+  fixed_length: null
