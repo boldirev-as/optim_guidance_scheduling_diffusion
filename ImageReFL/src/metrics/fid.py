@@ -18,15 +18,23 @@ class FIDMetric(nn.Module):
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.metric = FrechetInceptionDistance(feature=feature).to(device)
+        self._seen_real = 0
+        self._seen_fake = 0
 
     def reset(self) -> None:
         self.metric.reset()
+        self._seen_real = 0
+        self._seen_fake = 0
 
     def update(self, batch: dict, model=None) -> None:
+        if DatasetColumns.original_image.name not in batch:
+            return
         if "raw_image" in batch:
             fake = batch["raw_image"]
-        else:
+        elif "image" in batch:
             fake = batch["image"]
+        else:
+            return
         real = batch[DatasetColumns.original_image.name]
 
         fake = fake.float()
@@ -36,7 +44,13 @@ class FIDMetric(nn.Module):
 
         self.metric.update(real, real=True)
         self.metric.update(fake, real=False)
+        self._seen_real += real.shape[0]
+        self._seen_fake += fake.shape[0]
 
     @torch.no_grad()
     def _get_reward(self, model=None, logger=None, *args, **kwargs) -> float:
+        if self._seen_real == 0 or self._seen_fake == 0:
+            if logger is not None:
+                logger.warning("FIDMetric: missing real/fake samples, returning NaN.")
+            return float("nan")
         return float(self.metric.compute().item())
