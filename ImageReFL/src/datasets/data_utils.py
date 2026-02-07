@@ -67,7 +67,6 @@ def get_dataloaders(config, device: torch.device, all_models_with_tokenizer: lis
     datasets = {
         dataset_partition: instantiate(
             config.datasets[dataset_partition],
-            dataset_split=dataset_partition,
             all_models_with_tokenizer=all_models_with_tokenizer,
             logger=logger
         )
