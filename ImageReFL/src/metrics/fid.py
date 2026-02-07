@@ -21,6 +21,19 @@ class FIDMetric(nn.Module):
         self._seen_real = 0
         self._seen_fake = 0
 
+    def _to_uint8(self, x: torch.Tensor) -> torch.Tensor:
+        # Torchmetrics FID expects uint8 tensors in [0, 255], shape [B, C, H, W].
+        if x.dtype == torch.uint8:
+            return x.to(self.device, non_blocking=True)
+
+        x = x.float()
+        # Support both normalized [-1, 1] and image-space [0, 1] ranges.
+        if x.min().item() < 0.0:
+            x = x * 0.5 + 0.5
+        x = x.clamp(0, 1)
+        x = (x * 255.0).round().to(torch.uint8)
+        return x.to(self.device, non_blocking=True)
+
     def reset(self) -> None:
         self.metric.reset()
         self._seen_real = 0
@@ -37,10 +50,8 @@ class FIDMetric(nn.Module):
             return
         real = batch[DatasetColumns.original_image.name]
 
-        fake = fake.float()
-        real = real.float()
-        fake = (fake * 0.5 + 0.5).clamp(0, 1)
-        real = (real * 0.5 + 0.5).clamp(0, 1)
+        fake = self._to_uint8(fake)
+        real = self._to_uint8(real)
 
         self.metric.update(real, real=True)
         self.metric.update(fake, real=False)
