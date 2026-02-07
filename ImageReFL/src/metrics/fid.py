@@ -1,16 +1,18 @@
 import torch
+from torch import nn
 from torchmetrics.image.fid import FrechetInceptionDistance
 
 from src.constants.dataset import DatasetColumns
 
 
-class FIDMetric:
+class FIDMetric(nn.Module):
     def __init__(
         self,
         device: str = "cuda",
         model_suffix: str = "FID",
         feature: int = 2048,
     ):
+        super().__init__()
         self.model_suffix = model_suffix
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
