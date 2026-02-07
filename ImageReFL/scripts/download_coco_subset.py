@@ -1,7 +1,8 @@
 import argparse
 import json
-import os
+import time
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 import datasets
@@ -18,11 +19,30 @@ def parse_args():
     parser.add_argument("--image-column", default="coco_url")
     parser.add_argument("--save-captions", action="store_true")
     parser.add_argument("--captions-out", default=None)
+    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--retries", type=int, default=8)
+    parser.add_argument("--retry-delay", type=float, default=1.0)
     return parser.parse_args()
 
 
 def get_image_name_by_index(index: int) -> str:
     return f"{index:05}.jpg"
+
+
+def download_with_retries(url: str, dst: Path, timeout: float, retries: int, retry_delay: float) -> None:
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            with urlopen(url, timeout=timeout) as resp, open(dst, "wb") as f:
+                f.write(resp.read())
+            return
+        except (HTTPError, URLError, TimeoutError) as err:
+            last_err = err
+            if attempt >= retries:
+                break
+            # Exponential backoff for transient COCO host issues (e.g. HTTP 503).
+            time.sleep(retry_delay * (2 ** attempt))
+    raise RuntimeError(f"Failed to download {url} -> {dst}: {last_err}") from last_err
 
 
 def main():
@@ -34,7 +54,6 @@ def main():
     ds = datasets.load_dataset(
         args.dataset,
         split=split,
-        trust_remote_code=True,
         streaming=False,
     )
 
@@ -46,8 +65,13 @@ def main():
             raise RuntimeError(f"Missing {args.image_column} at index {idx}")
         img_path = out_dir / get_image_name_by_index(idx)
         if not img_path.exists():
-            with urlopen(url) as resp, open(img_path, "wb") as f:
-                f.write(resp.read())
+            download_with_retries(
+                url=url,
+                dst=img_path,
+                timeout=args.timeout,
+                retries=args.retries,
+                retry_delay=args.retry_delay,
+            )
         if args.save_captions:
             caption = row.get(args.text_column)
             if isinstance(caption, list):
