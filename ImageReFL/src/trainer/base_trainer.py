@@ -120,7 +120,9 @@ class BaseTrainer:
             writer=self.writer,
         )
         self.evaluation_metrics = MetricTracker(
-            *self.evaluation_loss_names, 'LSCD',
+            *self.evaluation_loss_names,
+            *[metric.model_suffix for metric in self.val_model_metrics],
+            'LSCD',
             writer=self.writer,
         )
 
@@ -147,9 +149,6 @@ class BaseTrainer:
         evaluation_loss_names = [
             reward_model.model_suffix for reward_model in self.val_reward_models
         ]
-        evaluation_loss_names.extend(
-            metric.model_suffix for metric in self.val_model_metrics
-        )
         evaluation_loss_names.append(self.train_reward_model.model_suffix)
         return evaluation_loss_names
 
