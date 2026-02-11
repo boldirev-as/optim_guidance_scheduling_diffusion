@@ -29,7 +29,7 @@ trainer:
   loss_scale: 1
   max_grad_norm: 1
   accumulation_steps: 256
-  num_steps: 32
+  num_steps: 40
   min_mid_timestep: 30
   max_mid_timestep: 40
   eval_period: 2
