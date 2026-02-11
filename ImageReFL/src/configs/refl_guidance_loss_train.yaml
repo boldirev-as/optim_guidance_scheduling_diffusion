@@ -2,52 +2,67 @@ defaults:
   - model: stable_diffusion_15
   - reward_models: clip_score
   - writer: train
-  - datasets: coco_prompts
+  - datasets: coco_image_prompts_eval
   - dataloader: refl
   - transforms: empty
   - _self_
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 1e-4
+  lr: 8e-5
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.01
 lr_scheduler: null
 model:
   do_guidance_w_loss: True
   no_grad: True
+  negative_prompt: "blurred, blurry, disfigured, ugly, tiling, poorly drawn"
+  noise_scheduler:
+    _target_: diffusers.DDIMScheduler.from_pretrained
+    pretrained_model_name_or_path: ${model.pretrained_model_name}
+    subfolder: scheduler
   guidance_delta_scale: 5.0
   guidance_omega_min: null
   guidance_omega_max: null
 trainer:
   type: 'ReFL'
-  loss_scale: 20
+  loss_scale: 1
   max_grad_norm: 1
-  accumulation_steps: 8
-  min_mid_timestep: 32
+  accumulation_steps: 256
+  min_mid_timestep: 30
   max_mid_timestep: 40
+  eval_period: 2
   log_step: 2
-  n_epochs: 5
-  epoch_len: 20
+  n_epochs: 40
+  epoch_len: 5
   resume_from: null # null or path to the checkpoint dir with *.pth and config.yaml
   device: auto # device name or "auto"
-  override: False # if True, will override the previous run with the same name
+  override: True # if True, will override the previous run with the same name
   monitor: "off" # "off" or "max/min metric_name", i.e. our goal is to maximize/minimize metric
-  save_period: 5 # checkpoint each save_period epochs in addition to the best epoch
-  save_checkpoints: False
+  save_period: 2 # checkpoint each save_period epochs in addition to the best epoch
+  save_checkpoints: True
   early_stop: ${trainer.n_epochs} # epochs for early stopping
   save_dir: "refl_guidance_loss_saved/"
   seed: 1
   mse_loss_scale: 0
   do_classifier_free_guidance: True
-  detach_main_path: False
+  detach_main_path: True
   calculate_initial_model_metrics: True
   requires_score_grad: True
+  log_fixed_prompt: True
+  fixed_prompts:
+    - "a photo of a golden retriever sitting on a blue chair, studio lighting"
+    - "a bowl of ramen on a wooden table, top-down, soft natural light"
+    - "a red bicycle leaning against a brick wall, sunny day, 35mm photo"
+    - "a cozy living room with a fireplace and bookshelves, warm lighting"
+    - "a close-up portrait of a woman wearing a red scarf, shallow depth of field"
+  fixed_prompt_seed: 123
+  leak_check_max_samples: 2000
+  leak_check_action: "warn"
   guidance_reg_lambda: 0.0
   log_guidance_schedule: True
   guidance_schedule_log_seeds: 3
-dataloader:
-  test:
-    batch_size: 1
-datasets:
-  train:
-    fixed_length: 1000
-  test:
-    fixed_length: 200
+reward_models:
+  train_model:
+    reward_scale_factor: 100000.0
+    reward_offset: 0.0
