@@ -63,5 +63,5 @@ trainer:
   leak_check_action: "warn"
 reward_models:
   train_model:
-    reward_scale_factor: 100000.0
+    reward_scale_factor: 0.0
     reward_offset: 0.0
