@@ -17,7 +17,13 @@ conda activate ml_new
 export WANDB_MODE=offline
 export WANDB_DIR=wandb_offline/
 export HYDRA_FULL_ERROR=1
+export PYTHONUNBUFFERED=1
+
+export TMPDIR="${SLURM_TMPDIR:-$PWD/tmp}"
+export TEMP="${TMPDIR}"
+export TMP="${TMPDIR}"
+mkdir -p "${TMPDIR}"
 
 unset http_proxy HTTPS_PROXY HTTP_PROXY https_proxy ALL_PROXY all_proxy
 
-srun python train.py --config-name rcsgp
+srun python train.py --config-name rcsgp dataloader.train.num_workers=0 dataloader.test.num_workers=0
