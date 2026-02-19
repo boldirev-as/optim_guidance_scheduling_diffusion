@@ -1,0 +1,97 @@
+defaults:
+  - model: stable_diffusion_15
+  - reward_models: clip_score
+  - writer: train
+  - datasets: coco_image_prompts_eval
+  - dataloader: refl
+  - transforms: empty
+  - _self_
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 8e-5
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.01
+
+lr_scheduler: null
+
+model:
+  do_guidance_w_loss: True
+  no_grad: True
+  negative_prompt: "blurred, blurry, disfigured, ugly, tiling, poorly drawn"
+  noise_scheduler:
+    _target_: diffusers.DDIMScheduler.from_pretrained
+    pretrained_model_name_or_path: ${model.pretrained_model_name}
+    subfolder: scheduler
+  guidance_net_type: rcsgp
+  guidance_scale: 7.5
+  guidance_omega_min: 0.0
+  guidance_omega_max: 12.0
+  guidance_policy_hidden_dim: 1024
+  guidance_policy_num_mixtures: 3
+  guidance_policy_prior_std: 0.75
+  guidance_policy_prior_start: 7.5
+  guidance_policy_prior_end: 5.5
+  guidance_policy_stochastic_train: True
+  guidance_policy_stochastic_eval: False
+
+trainer:
+  type: "RCSGP"
+  loss_scale: 1
+  max_grad_norm: 1
+  accumulation_steps: 256
+  num_steps: 32
+  s_min: 0.01
+  delta: 0.2
+  zeta: 0.01
+  m: 1
+  beta: 1.75
+  lambda_sc: 1.0
+
+  actor_loss_scale: 0.05
+  value_loss_scale: 0.10
+  risk_loss_scale: 0.20
+  kl_loss_scale: 0.01
+  smooth_loss_scale: 0.02
+  entropy_loss_scale: 0.001
+
+  risk_alpha: 0.15
+  risk_lambda_init: 0.0
+  risk_dual_lr: 0.01
+  risk_sc_threshold: 1.5
+  risk_sc_margin: 0.05
+  sc_ema_decay: 0.95
+
+  eval_period: 2
+  log_step: 2
+  n_epochs: 40
+  epoch_len: 20
+  resume_from: null
+  device: auto
+  override: True
+  monitor: "off"
+  save_period: 2
+  save_checkpoints: True
+  early_stop: ${trainer.n_epochs}
+  save_dir: "refl_guidance_loss_saved/"
+  seed: 1
+  mse_loss_scale: 0
+  do_classifier_free_guidance: True
+  detach_main_path: True
+  calculate_initial_model_metrics: True
+  requires_score_grad: True
+
+  log_fixed_prompt: True
+  fixed_prompts:
+    - "a photo of a golden retriever sitting on a blue chair, studio lighting"
+    - "a bowl of ramen on a wooden table, top-down, soft natural light"
+    - "a red bicycle leaning against a brick wall, sunny day, 35mm photo"
+    - "a cozy living room with a fireplace and bookshelves, warm lighting"
+    - "a close-up portrait of a woman wearing a red scarf, shallow depth of field"
+  fixed_prompt_seed: 123
+
+reward_models:
+  train_model:
+    reward_scale_factor: 5.0
+    reward_offset: 0.0

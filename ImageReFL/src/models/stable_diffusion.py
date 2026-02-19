@@ -15,6 +15,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 
 from src.constants.dataset import DatasetColumns
 from src.models.base_model import BaseModel
+from src.models.guidance_policy_net import RCSGPGuidanceNet
 
 from collections import deque
 
@@ -113,6 +114,7 @@ class GuidanceNet(nn.Module):
             timestep: torch.Tensor,
             timestep_cond: torch.Tensor | None = None,
             added_cond_kwargs: dict | None = None,
+            **_,
     ) -> torch.Tensor:
         B = input_ids.size(0)
         if encoder_hidden_states.size(0) == 2 * B:
@@ -154,6 +156,14 @@ class StableDiffusion(BaseModel):
             guidance_delta_scale: float = 1.0,
             guidance_omega_min: float | None = None,
             guidance_omega_max: float | None = None,
+            guidance_net_type: str = "vanilla",
+            guidance_policy_hidden_dim: int = 1024,
+            guidance_policy_num_mixtures: int = 3,
+            guidance_policy_prior_std: float = 0.75,
+            guidance_policy_prior_start: float = 7.5,
+            guidance_policy_prior_end: float = 5.5,
+            guidance_policy_stochastic_train: bool = True,
+            guidance_policy_stochastic_eval: bool = False,
             negative_prompt: str = "",
             use_ema: bool = False,
             use_lora: bool = False,
@@ -262,25 +272,45 @@ class StableDiffusion(BaseModel):
         self.last_omegas = []
         self.omegas_history = deque(maxlen=10)
         self.omega_schedule: list[torch.Tensor] = []
+        self.guidance_net_type = guidance_net_type
 
-        # if self.do_guidance_w_loss:
-
-        # self.guidance_net = GuidanceNet(
-        #     time_emb_dim=self.unet.time_embedding.linear_2.out_features,
-        #     cond_dim=self.text_encoder.config.hidden_size
-        # )
-        self.guidance_net = GuidanceNet(
-            cond_dim=self.text_encoder.config.hidden_size,
-            time_emb_dim=self.unet.time_embedding.linear_2.out_features,
-            base_scale=self.guidance_scale,
-            delta_scale=guidance_delta_scale,
-            omega_min=guidance_omega_min,
-            omega_max=guidance_omega_max,
-            pad_id=getattr(self.tokenizer, "pad_token_id", None),
-            bos_id=getattr(self.tokenizer, "bos_token_id", None),
-            eos_id=getattr(self.tokenizer, "eos_token_id", None),
-            use_attn_pool=True,
-        )
+        guidance_net_type = str(guidance_net_type).lower()
+        if guidance_net_type == "rcsgp":
+            omega_min = 0.0 if guidance_omega_min is None else float(guidance_omega_min)
+            if guidance_omega_max is None:
+                omega_max = max(12.0, 1.5 * float(self.guidance_scale))
+            else:
+                omega_max = float(guidance_omega_max)
+            self.guidance_net = RCSGPGuidanceNet(
+                cond_dim=self.text_encoder.config.hidden_size,
+                time_emb_dim=self.unet.time_embedding.linear_2.out_features,
+                hidden_dim=guidance_policy_hidden_dim,
+                num_mixtures=guidance_policy_num_mixtures,
+                base_scale=self.guidance_scale,
+                omega_min=omega_min,
+                omega_max=omega_max,
+                prior_std=guidance_policy_prior_std,
+                prior_start=guidance_policy_prior_start,
+                prior_end=guidance_policy_prior_end,
+                stochastic_train=guidance_policy_stochastic_train,
+                stochastic_eval=guidance_policy_stochastic_eval,
+                pad_id=getattr(self.tokenizer, "pad_token_id", None),
+                bos_id=getattr(self.tokenizer, "bos_token_id", None),
+                use_attn_pool=True,
+            )
+        else:
+            self.guidance_net = GuidanceNet(
+                cond_dim=self.text_encoder.config.hidden_size,
+                time_emb_dim=self.unet.time_embedding.linear_2.out_features,
+                base_scale=self.guidance_scale,
+                delta_scale=guidance_delta_scale,
+                omega_min=guidance_omega_min,
+                omega_max=guidance_omega_max,
+                pad_id=getattr(self.tokenizer, "pad_token_id", None),
+                bos_id=getattr(self.tokenizer, "bos_token_id", None),
+                eos_id=getattr(self.tokenizer, "eos_token_id", None),
+                use_attn_pool=True,
+            )
         self.guidance_net.requires_grad_(True)
 
         # self.guidance_scale_grad = nn.Parameter(
@@ -505,6 +535,13 @@ class StableDiffusion(BaseModel):
 
                     enc_for_guidance = encoder_hidden_states.detach()
                     sample_for_guidance = latent_model_input_cond.detach()
+                    prev_omega = None
+                    if (
+                            torch.is_tensor(self.last_omegas)
+                            and self.last_omegas.numel() > 0
+                            and self.last_omegas.size(0) == batch_size
+                    ):
+                        prev_omega = self.last_omegas.reshape(batch_size, -1)[:, :1].detach()
 
                     with torch.cuda.amp.autocast(enabled=False):
                         omega = self.guidance_net(
@@ -515,6 +552,10 @@ class StableDiffusion(BaseModel):
                             timestep=timestep,
                             timestep_cond=None,
                             added_cond_kwargs=None,
+                            noise_pred_uncond=noise_pred_uncond.detach(),
+                            noise_pred_text=noise_pred_text.detach(),
+                            prev_omega=prev_omega,
+                            timestep_index=timestep_index,
                         )
                         # omega = self.guidance_net(cond_embed, t_index)
 
@@ -684,6 +725,9 @@ class StableDiffusion(BaseModel):
 
         if do_classifier_free_guidance and self.do_guidance_w_loss:
             self.omega_schedule = []
+            self.last_omegas = []
+            if hasattr(self.guidance_net, "reset_step_infos"):
+                self.guidance_net.reset_step_infos()
 
         for timestep_index in range(start_timestep_index, end_timestep_index - 1):
             latents, _ = self.predict_next_latents(

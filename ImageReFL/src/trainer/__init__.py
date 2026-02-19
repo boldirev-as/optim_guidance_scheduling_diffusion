@@ -8,3 +8,4 @@ from src.trainer.inferencer import Inferencer
 from src.trainer.profusion_inference import ProFusionInferencer
 from src.trainer.refl_trainer import ReFLTrainer
 from src.trainer.guidance_trainer import SelfConsistencyTrainer
+from src.trainer.rcsgp_trainer import RCSGPTrainer
