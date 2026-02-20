@@ -236,8 +236,9 @@ class RCSGPTrainer(SelfConsistencyTrainer):
                 sc_loss = term1
 
             policy_stats = self._policy_losses(step_infos=step_infos, sc_term=term1)
-            for k in log_accumulator:
-                log_accumulator[k].append(policy_stats[k].detach())
+            for key, value in policy_stats.items():
+                if key in log_accumulator:
+                    log_accumulator[key].append(value.detach())
 
             loss_i = sc_loss + policy_stats["policy_loss"]
             losses.append(loss_i)

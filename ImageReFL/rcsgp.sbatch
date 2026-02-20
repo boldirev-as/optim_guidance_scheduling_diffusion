@@ -26,4 +26,7 @@ mkdir -p "${TMPDIR}"
 
 unset http_proxy HTTPS_PROXY HTTP_PROXY https_proxy ALL_PROXY all_proxy
 
-srun python train.py --config-name rcsgp dataloader.train.num_workers=0 dataloader.test.num_workers=0
+srun python train.py --config-name rcsgp \
+  dataloader.train.num_workers=0 \
+  dataloader.test.num_workers=0 \
+  datasets.test.fixed_length=336
