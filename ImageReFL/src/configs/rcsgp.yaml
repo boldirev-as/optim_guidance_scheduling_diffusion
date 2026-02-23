@@ -40,7 +40,7 @@ trainer:
   type: "RCSGP"
   loss_scale: 1
   max_grad_norm: 1
-  accumulation_steps: 256
+  accumulation_steps: 64
   num_steps: 32
   s_min: 0.01
   delta: 0.2
@@ -52,8 +52,8 @@ trainer:
   actor_loss_scale: 0.05
   value_loss_scale: 0.10
   risk_loss_scale: 0.20
-  kl_loss_scale: 0.01
-  smooth_loss_scale: 0.02
+  kl_loss_scale: 0.03
+  smooth_loss_scale: 0.05
   entropy_loss_scale: 0.001
 
   risk_alpha: 0.15
@@ -63,10 +63,13 @@ trainer:
   risk_sc_margin: 0.05
   sc_ema_decay: 0.95
 
-  eval_period: 2
+  eval_period: 4
   log_step: 2
   n_epochs: 40
-  epoch_len: 4
+  epoch_len: 16
+  reward_scale_start: 0.0
+  reward_scale_target: 1.0
+  reward_scale_warmup_epochs: 10
   resume_from: null
   device: auto
   override: True
@@ -93,5 +96,5 @@ trainer:
 
 reward_models:
   train_model:
-    reward_scale_factor: 5.0
+    reward_scale_factor: 1.0
     reward_offset: 0.0

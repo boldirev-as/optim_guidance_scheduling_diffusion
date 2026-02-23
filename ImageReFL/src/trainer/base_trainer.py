@@ -60,6 +60,18 @@ class BaseTrainer:
         self.val_reward_models = val_reward_models
         self.val_model_metrics: list[Callable[[StableDiffusion], float]] = val_model_metrics or []
 
+        base_reward_scale = float(getattr(self.train_reward_model, "reward_scale_factor", 1.0))
+        reward_scale_start_cfg = self.cfg_trainer.get("reward_scale_start", None)
+        reward_scale_target_cfg = self.cfg_trainer.get("reward_scale_target", None)
+        self.reward_scale_start = (
+            base_reward_scale if reward_scale_start_cfg is None else float(reward_scale_start_cfg)
+        )
+        self.reward_scale_target = (
+            base_reward_scale if reward_scale_target_cfg is None else float(reward_scale_target_cfg)
+        )
+        self.reward_scale_warmup_epochs = int(self.cfg_trainer.get("reward_scale_warmup_epochs", 0))
+        self.current_reward_scale = base_reward_scale
+
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.batch_transforms = batch_transforms
@@ -151,6 +163,21 @@ class BaseTrainer:
         ]
         evaluation_loss_names.append(self.train_reward_model.model_suffix)
         return evaluation_loss_names
+
+    def _compute_reward_scale_for_epoch(self, epoch: int) -> float:
+        if self.reward_scale_warmup_epochs <= 0:
+            return self.reward_scale_target
+        if self.reward_scale_warmup_epochs == 1:
+            return self.reward_scale_target
+        progress = (epoch - 1) / float(self.reward_scale_warmup_epochs - 1)
+        progress = min(max(progress, 0.0), 1.0)
+        return self.reward_scale_start + progress * (self.reward_scale_target - self.reward_scale_start)
+
+    def _set_reward_scale_for_epoch(self, epoch: int) -> None:
+        reward_scale = self._compute_reward_scale_for_epoch(epoch)
+        if hasattr(self.train_reward_model, "reward_scale_factor"):
+            self.train_reward_model.reward_scale_factor = reward_scale
+        self.current_reward_scale = reward_scale
 
     def train(self):
         """
@@ -273,6 +300,8 @@ class BaseTrainer:
         self.train_metrics.reset()
         self.writer.set_step((epoch - 1) * self.epoch_len)
         self.writer.add_scalar("epoch", epoch)
+        self._set_reward_scale_for_epoch(epoch)
+        self.writer.add_scalar("reward_scale_factor", self.current_reward_scale)
         accumulation_step = 0
         batch_idx = 0
         self.optimizer.zero_grad()
@@ -363,6 +392,8 @@ class BaseTrainer:
             for part, dataloader in self.evaluation_dataloaders.items():
                 val_logs = self._evaluation_epoch(epoch, part, dataloader)
                 logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
+
+        logs["reward_scale_factor"] = self.current_reward_scale
 
         return logs
 
