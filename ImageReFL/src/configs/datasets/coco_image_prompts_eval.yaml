@@ -31,7 +31,7 @@ test:
   dataset_name: phiyodr/coco2017
   dataset_split: validation
   subset_percent: null
-  subset_size: 500
+  subset_size: 1000
   subset_seed: 0
 
   image_column: coco_url

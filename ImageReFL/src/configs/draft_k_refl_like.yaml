@@ -32,7 +32,7 @@ trainer:
   type: "DraftK"
   loss_scale: 1
   max_grad_norm: 1
-  accumulation_steps: 70
+  accumulation_steps: 256
   num_steps: 40
   first_steps_count: 30
   k_steps: 10
@@ -54,7 +54,7 @@ trainer:
   mse_loss_scale: 0
   do_classifier_free_guidance: True
   detach_main_path: True
-  calculate_initial_model_metrics: False
+  calculate_initial_model_metrics: True
   requires_score_grad: True
 
   log_fixed_prompt: True
