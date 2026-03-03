@@ -8,7 +8,7 @@ train:
   dataset_split: train
 
   subset_percent: null
-  subset_size: 5000
+  subset_size: 1000
   subset_seed: 0
 
   image_column: coco_url
@@ -31,7 +31,7 @@ test:
   dataset_name: phiyodr/coco2017
   dataset_split: validation
   subset_percent: null
-  subset_size: 1000
+  subset_size: 200
   subset_seed: 0
 
   image_column: coco_url
