@@ -41,7 +41,7 @@ trainer:
   eval_period: 2
   log_step: 2
   n_epochs: 20
-  epoch_len: 5
+  epoch_len: 1
   resume_from: null
   device: auto
   override: True
