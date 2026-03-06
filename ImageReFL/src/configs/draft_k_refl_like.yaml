@@ -31,7 +31,7 @@ model:
 trainer:
   type: "DraftK"
   loss_scale: 1
-  max_grad_norm: 1
+  max_grad_norm: null
   accumulation_steps: 256
   num_steps: 40
   first_steps_count: 30
