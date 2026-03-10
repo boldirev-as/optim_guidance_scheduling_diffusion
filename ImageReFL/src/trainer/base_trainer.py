@@ -134,7 +134,6 @@ class BaseTrainer:
         self.evaluation_metrics = MetricTracker(
             *self.evaluation_loss_names,
             *[metric.model_suffix for metric in self.val_model_metrics],
-            'LSCD',
             writer=self.writer,
         )
 
