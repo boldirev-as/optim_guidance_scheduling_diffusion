@@ -723,6 +723,10 @@ class StableDiffusion(BaseModel):
         if latents is None:
             latents = self.get_latents(batch_size=batch_size, device=device, seed=seed)
 
+        # Allow zero-step warmup/prefix calls without accidentally indexing -1.
+        if start_timestep_index == end_timestep_index:
+            return latents, encoder_hidden_states
+
         if do_classifier_free_guidance and self.do_guidance_w_loss:
             self.omega_schedule = []
             self.last_omegas = []
