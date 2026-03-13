@@ -1,7 +1,9 @@
+import os
 from abc import abstractmethod
 from typing import Optional, Callable
 
 import torch
+import torch.distributed as dist
 from numpy import inf
 from torch.cuda.amp import autocast
 from torch.nn.utils import clip_grad_norm_
@@ -51,6 +53,16 @@ class BaseTrainer:
 
         self.device = device
         self.skip_oom = skip_oom
+        self.rank = int(os.environ.get("RANK", "0"))
+        self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        self.local_rank = int(os.environ.get("LOCAL_RANK", str(self.rank)))
+        self.distributed_eval_only = (
+            bool(self.cfg_trainer.get("distributed_eval_only", False))
+            and self.world_size > 1
+            and dist.is_available()
+            and dist.is_initialized()
+        )
+        self.is_main_process = self.rank == 0
 
         self.logger = logger
         self.log_step = config.trainer.get("log_step", 50)
@@ -191,6 +203,49 @@ class BaseTrainer:
                 self._save_checkpoint(self._last_epoch, save_best=False)
             raise e
 
+    def _barrier(self):
+        if self.distributed_eval_only:
+            dist.barrier()
+
+    def _sync_metric_tracker(self, metric_tracker: MetricTracker) -> None:
+        if not self.distributed_eval_only:
+            return
+        for key in metric_tracker.keys():
+            total = torch.tensor(
+                float(metric_tracker._data.loc[key, "total"]),
+                device=self.device,
+                dtype=torch.float64,
+            )
+            counts = torch.tensor(
+                float(metric_tracker._data.loc[key, "counts"]),
+                device=self.device,
+                dtype=torch.float64,
+            )
+            dist.all_reduce(total, op=dist.ReduceOp.SUM)
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+            total_value = total.item()
+            counts_value = counts.item()
+            metric_tracker._data.loc[key, "total"] = total_value
+            metric_tracker._data.loc[key, "counts"] = counts_value
+            metric_tracker._data.loc[key, "average"] = (
+                total_value / counts_value if counts_value > 0 else 0.0
+            )
+
+    def _eval_worker_process(self):
+        eval_period = int(self.cfg_trainer.get("eval_period", 1))
+        if eval_period <= 0:
+            eval_period = 1
+
+        if self.cfg_trainer.calculate_initial_model_metrics:
+            for part, dataloader in self.evaluation_dataloaders.items():
+                self._evaluation_epoch(self.start_epoch - 1, part, dataloader)
+
+        for epoch in range(self.start_epoch, self.epochs + 1):
+            self._last_epoch = epoch
+            if epoch % eval_period == 0:
+                for part, dataloader in self.evaluation_dataloaders.items():
+                    self._evaluation_epoch(epoch, part, dataloader)
+
     def _train_process(self):
         """
         Full training logic:
@@ -199,6 +254,10 @@ class BaseTrainer:
         and monitoring the performance improvement (for early stopping
         and saving the best checkpoint).
         """
+        if self.distributed_eval_only and not self.is_main_process:
+            self._eval_worker_process()
+            return
+
         not_improved_count = 0
 
         if self.cfg_trainer.calculate_initial_model_metrics:
@@ -412,6 +471,7 @@ class BaseTrainer:
         self.model.eval()
         if self.model.guidance_net is not None:
             self.model.guidance_net.eval()
+        self._barrier()
         self.evaluation_metrics.reset()
         for metric in self.val_model_metrics:
             if hasattr(metric, "reset"):
@@ -425,6 +485,7 @@ class BaseTrainer:
                     enumerate(dataloader),
                     desc=part,
                     total=len(dataloader),
+                    disable=not self.is_main_process,
             ):
 
                 batch = self.process_batch(
@@ -446,13 +507,17 @@ class BaseTrainer:
                 value = float(metric._get_reward(self.model, self.logger))
                 self.evaluation_metrics.update(metric.model_suffix, value)
 
-            self.writer.set_step(epoch * self.epoch_len, part)
-            self._log_scalars(self.evaluation_metrics)
-            self._log_batch(
-                batch_idx, collate_fn(first_batches), part
-            )
-            self._log_fixed_prompt_images(epoch=epoch, part=part)
+            self._sync_metric_tracker(self.evaluation_metrics)
 
+            if self.is_main_process:
+                self.writer.set_step(epoch * self.epoch_len, part)
+                self._log_scalars(self.evaluation_metrics)
+                self._log_batch(
+                    batch_idx, collate_fn(first_batches), part
+                )
+                self._log_fixed_prompt_images(epoch=epoch, part=part)
+
+        self._barrier()
         return self.evaluation_metrics.result()
 
     def _monitor_performance(self, logs, not_improved_count):

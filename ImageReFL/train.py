@@ -1,7 +1,10 @@
+import logging
+import os
 import warnings
 
 import hydra
 import torch
+import torch.distributed as dist
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from torch.cuda.amp import GradScaler
@@ -9,6 +12,7 @@ from torch.cuda.amp import GradScaler
 from src.models.stable_diffusion import GuidanceNet
 from src.constants.trainer import TRAINER_NAME_TO_CLASS
 from src.datasets.data_utils import get_dataloaders
+from src.logger.noop import NoOpWriter
 from src.utils.init_utils import set_random_seed, setup_saving_and_logging
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -26,11 +30,32 @@ def main(config):
     """
     set_random_seed(config.trainer.seed)
 
-    project_config = OmegaConf.to_container(config)
-    logger = setup_saving_and_logging(config)
-    writer = instantiate(config.writer, logger, project_config)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
+    is_distributed = world_size > 1
+    is_main_process = rank == 0
 
-    if config.trainer.device == "auto":
+    if is_distributed:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Distributed launch requires CUDA devices.")
+        torch.cuda.set_device(local_rank)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+
+    project_config = OmegaConf.to_container(config)
+    if not is_distributed or is_main_process:
+        logger = setup_saving_and_logging(config)
+        writer = instantiate(config.writer, logger, project_config)
+    else:
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(f"train_rank_{rank}")
+        logger.setLevel(logging.INFO)
+        writer = NoOpWriter()
+
+    if is_distributed:
+        device = f"cuda:{local_rank}"
+    elif config.trainer.device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
         device = config.trainer.device
@@ -116,7 +141,12 @@ def main(config):
         # guidance_net=guidance_net
     )
 
-    trainer.train()
+    try:
+        trainer.train()
+    finally:
+        if is_distributed and dist.is_initialized():
+            dist.barrier()
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

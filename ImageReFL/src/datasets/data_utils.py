@@ -1,7 +1,9 @@
+import os
 from itertools import repeat
 
 import torch
 from hydra.utils import instantiate
+from torch.utils.data.distributed import DistributedSampler
 
 from src.datasets.collate import collate_fn
 from src.utils.init_utils import set_worker_seed
@@ -121,6 +123,9 @@ def get_dataloaders(config, device: torch.device, all_models_with_tokenizer: lis
             logger.warning(msg)
     # dataloaders init
     dataloaders = {}
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    distributed_eval_only = bool(config.trainer.get("distributed_eval_only", False)) and world_size > 1
     for dataset_partition in config.datasets.keys():
         dataset = datasets[dataset_partition]
 
@@ -129,12 +134,25 @@ def get_dataloaders(config, device: torch.device, all_models_with_tokenizer: lis
             f"be larger than the dataset length ({len(dataset)})"
         )
 
+        sampler = None
+        shuffle = (dataset_partition == "train")
+        if distributed_eval_only and dataset_partition != "train":
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=False,
+                drop_last=False,
+            )
+            shuffle = False
+
         partition_dataloader = instantiate(
             config.dataloader[dataset_partition],
             dataset=dataset,
             collate_fn=collate_fn,
             drop_last=(dataset_partition == "train"),
-            shuffle=(dataset_partition == "train"),
+            shuffle=shuffle,
+            sampler=sampler,
             worker_init_fn=set_worker_seed,
         )
         dataloaders[dataset_partition] = partition_dataloader
