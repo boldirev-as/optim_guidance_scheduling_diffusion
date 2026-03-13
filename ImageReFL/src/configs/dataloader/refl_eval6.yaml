@@ -1,0 +1,11 @@
+train:
+  _target_: torch.utils.data.DataLoader
+  batch_size: 1
+  num_workers: 1
+  pin_memory: True
+  shuffle: True
+test:
+  _target_: torch.utils.data.DataLoader
+  batch_size: 6
+  num_workers: 6
+  pin_memory: True
