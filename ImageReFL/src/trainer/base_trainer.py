@@ -26,6 +26,9 @@ class BaseTrainer:
     """
     Base class for all trainers.
     """
+    _DIST_CMD_SKIP = 0
+    _DIST_CMD_EVAL = 1
+    _DIST_CMD_STOP = 2
 
     def __init__(
             self,
@@ -205,7 +208,15 @@ class BaseTrainer:
 
     def _barrier(self):
         if self.distributed_eval_only:
-            dist.barrier()
+            dist.barrier(device_ids=[self.local_rank])
+
+    def _broadcast_dist_command(self, command: int, epoch: int) -> tuple[int, int]:
+        if not self.distributed_eval_only:
+            return command, epoch
+
+        payload = torch.tensor([command, epoch], device=self.device, dtype=torch.long)
+        dist.broadcast(payload, src=0)
+        return int(payload[0].item()), int(payload[1].item())
 
     def _sync_metric_tracker(self, metric_tracker: MetricTracker) -> None:
         if not self.distributed_eval_only:
@@ -232,19 +243,26 @@ class BaseTrainer:
             )
 
     def _eval_worker_process(self):
-        eval_period = int(self.cfg_trainer.get("eval_period", 1))
-        if eval_period <= 0:
-            eval_period = 1
+        while True:
+            command, epoch = self._broadcast_dist_command(self._DIST_CMD_SKIP, 0)
+            if command == self._DIST_CMD_STOP:
+                return
+            if command != self._DIST_CMD_EVAL:
+                continue
 
-        if self.cfg_trainer.calculate_initial_model_metrics:
-            for part, dataloader in self.evaluation_dataloaders.items():
-                self._evaluation_epoch(self.start_epoch - 1, part, dataloader)
-
-        for epoch in range(self.start_epoch, self.epochs + 1):
             self._last_epoch = epoch
-            if epoch % eval_period == 0:
-                for part, dataloader in self.evaluation_dataloaders.items():
-                    self._evaluation_epoch(epoch, part, dataloader)
+            for part, dataloader in self.evaluation_dataloaders.items():
+                self._evaluation_epoch(epoch, part, dataloader)
+
+    def _run_distributed_evaluation(self, epoch: int) -> dict:
+        if self.distributed_eval_only:
+            self._broadcast_dist_command(self._DIST_CMD_EVAL, epoch)
+
+        logs = {}
+        for part, dataloader in self.evaluation_dataloaders.items():
+            val_logs = self._evaluation_epoch(epoch, part, dataloader)
+            logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
+        return logs
 
     def _train_process(self):
         """
@@ -262,9 +280,7 @@ class BaseTrainer:
 
         if self.cfg_trainer.calculate_initial_model_metrics:
             init_logs = {"epoch": self.start_epoch - 1}
-            for part, dataloader in self.evaluation_dataloaders.items():
-                val_logs = self._evaluation_epoch(self.start_epoch - 1, part, dataloader)
-                init_logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
+            init_logs.update(self._run_distributed_evaluation(self.start_epoch - 1))
             for key, value in init_logs.items():
                 self.logger.info(f"    init_{key:11s}: {value}")
 
@@ -291,6 +307,9 @@ class BaseTrainer:
 
             if stop_process:  # early_stop
                 break
+
+        if self.distributed_eval_only:
+            self._broadcast_dist_command(self._DIST_CMD_STOP, self._last_epoch)
 
     @abstractmethod
     def _sample_image_train(self, batch: dict[str, torch.Tensor]) -> None:
@@ -448,9 +467,9 @@ class BaseTrainer:
             eval_period = 1
         # Run val/test
         if epoch % eval_period == 0:
-            for part, dataloader in self.evaluation_dataloaders.items():
-                val_logs = self._evaluation_epoch(epoch, part, dataloader)
-                logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
+            logs.update(self._run_distributed_evaluation(epoch))
+        elif self.distributed_eval_only:
+            self._broadcast_dist_command(self._DIST_CMD_SKIP, epoch)
 
         logs["reward_scale_factor"] = self.current_reward_scale
 

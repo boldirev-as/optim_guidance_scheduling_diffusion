@@ -1,6 +1,7 @@
 import logging
 import os
 import warnings
+from datetime import timedelta
 
 import hydra
 import torch
@@ -41,7 +42,7 @@ def main(config):
             raise RuntimeError("Distributed launch requires CUDA devices.")
         torch.cuda.set_device(local_rank)
         if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
+            dist.init_process_group(backend="nccl", timeout=timedelta(hours=6))
 
     project_config = OmegaConf.to_container(config)
     if not is_distributed or is_main_process:
