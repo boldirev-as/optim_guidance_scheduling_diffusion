@@ -8,3 +8,4 @@ from src.reward_models.mps_score import MPS
 from src.reward_models.pick_score import PickScore
 from src.reward_models.diversity import Diversity
 from src.reward_models.lscd import LSCD
+from src.reward_models.weighted_sum import WeightedSumReward

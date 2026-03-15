@@ -169,14 +169,23 @@ class BaseTrainer:
         # self.guidance_net.requires_grad_(True)
 
     def _get_train_loss_names(self):
-        train_loss_names = [self.train_reward_model.model_suffix, "loss"]
+        train_loss_names = [self.train_reward_model.model_suffix]
+        component_names = getattr(
+            self.train_reward_model, "component_model_suffixes", []
+        )
+        for component_name in component_names:
+            if component_name not in train_loss_names:
+                train_loss_names.append(component_name)
+        train_loss_names.append("loss")
         return train_loss_names
 
     def _get_eval_loss_names(self):
         evaluation_loss_names = [
             reward_model.model_suffix for reward_model in self.val_reward_models
         ]
-        evaluation_loss_names.append(self.train_reward_model.model_suffix)
+        for reward_name in self._get_train_loss_names():
+            if reward_name != "loss" and reward_name not in evaluation_loss_names:
+                evaluation_loss_names.append(reward_name)
         return evaluation_loss_names
 
     def _compute_reward_scale_for_epoch(self, epoch: int) -> float:

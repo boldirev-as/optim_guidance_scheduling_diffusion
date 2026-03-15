@@ -74,8 +74,10 @@ def main(config):
     #     guidance_net = GuidanceNet(cond_dim=cond_dim, n_t_steps=10, base_scale=7.5).to(device)
 
     # build reward models
+    # Keep recursive instantiation disabled here so composite reward models
+    # can instantiate nested reward configs with the actual runtime device.
     train_reward_model = instantiate(
-        config.reward_models["train_model"], device=device
+        config.reward_models["train_model"], device=device, _recursive_=False
     ).to(device)
     train_reward_model.requires_grad_(False)
 

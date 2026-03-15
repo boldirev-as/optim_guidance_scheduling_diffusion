@@ -1,0 +1,20 @@
+train_model:
+  _target_: src.reward_models.WeightedSumReward
+  model_suffix: ClipHPSMix
+  reward_scale_factor: 100000.0
+  reward_offset: 0.0
+  weights: [0.5, 0.5]
+  reward_models:
+    - _target_: src.reward_models.ClipScore
+      reward_scale_factor: 1.0
+      reward_offset: 0.0
+    - _target_: src.reward_models.HPS
+      light_augmentation: false
+val_models:
+  - _target_: src.reward_models.HPS
+    light_augmentation: false
+  - _target_: src.reward_models.ClipScore
+  - _target_: src.reward_models.PickScore
+val_model_metrics:
+  - _target_: src.metrics.fid.FIDMetric
+    device: ${trainer.device}
