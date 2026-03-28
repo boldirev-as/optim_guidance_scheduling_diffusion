@@ -1,0 +1,11 @@
+train_model:
+  _target_: src.reward_models.ClipScore
+val_models:
+  - _target_: src.reward_models.HPS
+    light_augmentation: false
+  - _target_: src.reward_models.PickScore
+  - _target_: src.reward_models.Diversity
+    images_per_batch: 5
+val_model_metrics:
+  - _target_: src.metrics.fid.FIDMetric
+    device: ${trainer.device}

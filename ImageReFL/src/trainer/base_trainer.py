@@ -721,42 +721,66 @@ class BaseTrainer:
                 self.writer.add_scalar(f"{mode}_{key}", scalar_value)
 
         if self.cfg_trainer.get("log_guidance_schedule", False):
-            seeds = batch.get("seeds", [self.cfg_trainer.seed])
-            if isinstance(seeds, (int, float)):
-                seeds = [int(seeds)]
-            if isinstance(seeds, list) and seeds and isinstance(seeds[0], list):
-                seeds = seeds[0]
-            max_seeds = int(self.cfg_trainer.get("guidance_schedule_log_seeds", 3))
-            seeds = [int(s) for s in seeds[:max_seeds]]
-            tokenized = batch.get(DatasetColumns.tokenized_text.name, None)
-            if tokenized is not None:
-                base_tokens = tokenized[:1].to(self.device)
-                for seed in seeds:
-                    schedule_batch = {
-                        DatasetColumns.tokenized_text.name: base_tokens,
-                        "guidance_min_step": self.cfg_trainer.min_mid_timestep,
-                        "guidance_max_step": self.cfg_trainer.max_mid_timestep,
-                    }
-                    with torch.no_grad():
-                        self.model.set_timesteps(self.cfg_trainer.max_mid_timestep, device=self.device)
-                        self.model.do_k_diffusion_steps(
-                            latents=None,
-                            start_timestep_index=0,
-                            end_timestep_index=self.cfg_trainer.max_mid_timestep,
-                            batch=schedule_batch,
-                            return_pred_original=False,
-                            do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
-                            seed=seed,
-                        )
-                    min_step = self.cfg_trainer.min_mid_timestep
-                    max_step = self.cfg_trainer.max_mid_timestep
-                    omega_list = [
-                        float(x[0].item())
-                        for x in self.model.omega_schedule[min_step:max_step]
-                    ]
-                    self.logger.info(
-                        f"{mode}_guidance_schedule_seed_{seed}: {omega_list}"
+            def _run_schedule_log(schedule_batch: dict[str, torch.Tensor], seed: int, label: str) -> None:
+                with torch.no_grad():
+                    self.model.set_timesteps(self.cfg_trainer.max_mid_timestep, device=self.device)
+                    self.model.do_k_diffusion_steps(
+                        latents=None,
+                        start_timestep_index=0,
+                        end_timestep_index=self.cfg_trainer.max_mid_timestep,
+                        batch=schedule_batch,
+                        return_pred_original=False,
+                        do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
+                        seed=seed,
                     )
+                min_step = self.cfg_trainer.min_mid_timestep
+                max_step = self.cfg_trainer.max_mid_timestep
+                omega_list = [
+                    float(x[0].item())
+                    for x in self.model.omega_schedule[min_step:max_step]
+                ]
+                self.logger.info(f"{label}: {omega_list}")
+
+            fixed_prompts = self.cfg_trainer.get("fixed_prompts", None)
+            if isinstance(fixed_prompts, str):
+                fixed_prompts = [fixed_prompts]
+
+            if fixed_prompts and mode != "train":
+                fixed_seed = int(self.cfg_trainer.get("fixed_prompt_seed", self.cfg_trainer.seed))
+                for prompt_idx, fixed_prompt in enumerate(fixed_prompts, start=1):
+                    prompt_batch = self.model.tokenize(fixed_prompt)
+                    prompt_batch[DatasetColumns.tokenized_text.name] = prompt_batch[
+                        DatasetColumns.tokenized_text.name
+                    ].to(self.device)
+                    prompt_batch["guidance_min_step"] = self.cfg_trainer.min_mid_timestep
+                    prompt_batch["guidance_max_step"] = self.cfg_trainer.max_mid_timestep
+                    _run_schedule_log(
+                        schedule_batch=prompt_batch,
+                        seed=fixed_seed,
+                        label=f"{mode}_fixed_prompt_{prompt_idx}_guidance_schedule_seed_{fixed_seed}",
+                    )
+            else:
+                seeds = batch.get("seeds", [self.cfg_trainer.seed])
+                if isinstance(seeds, (int, float)):
+                    seeds = [int(seeds)]
+                if isinstance(seeds, list) and seeds and isinstance(seeds[0], list):
+                    seeds = seeds[0]
+                max_seeds = int(self.cfg_trainer.get("guidance_schedule_log_seeds", 3))
+                seeds = [int(s) for s in seeds[:max_seeds]]
+                tokenized = batch.get(DatasetColumns.tokenized_text.name, None)
+                if tokenized is not None:
+                    base_tokens = tokenized[:1].to(self.device)
+                    for seed in seeds:
+                        schedule_batch = {
+                            DatasetColumns.tokenized_text.name: base_tokens,
+                            "guidance_min_step": self.cfg_trainer.min_mid_timestep,
+                            "guidance_max_step": self.cfg_trainer.max_mid_timestep,
+                        }
+                        _run_schedule_log(
+                            schedule_batch=schedule_batch,
+                            seed=seed,
+                            label=f"{mode}_guidance_schedule_seed_{seed}",
+                        )
 
         # for i, guidance_scale in enumerate(guidance_scales):
         #     self.writer.add_scalar(

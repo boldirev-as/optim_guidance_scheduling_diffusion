@@ -141,6 +141,141 @@ class GuidanceNet(nn.Module):
         return omega
 
 
+class PromptProfileGuidanceNet(nn.Module):
+    """
+    Low-dimensional prompt-conditioned guidance schedule.
+
+    Instead of predicting an independent omega for every step, the network learns
+    a shared step profile basis and predicts prompt-specific coefficients over it.
+    """
+
+    def __init__(
+            self,
+            cond_dim: int,
+            schedule_steps: int,
+            prompt_hidden_dim: int = 256,
+            profile_rank: int = 2,
+            base_scale: float = 7.5,
+            delta_scale: float = 1.0,
+            omega_min: float | None = None,
+            omega_max: float | None = None,
+            pad_id: int | None = None,
+            bos_id: int | None = None,
+            eos_id: int | None = None,
+            use_attn_pool: bool = True,
+    ):
+        super().__init__()
+        if schedule_steps <= 0:
+            raise ValueError("schedule_steps must be > 0")
+        if profile_rank <= 0:
+            raise ValueError("profile_rank must be > 0")
+
+        self.schedule_steps = int(schedule_steps)
+        self.profile_rank = int(profile_rank)
+        self.base_scale = float(base_scale)
+        self.delta_scale = float(delta_scale)
+        self.omega_min = omega_min
+        self.omega_max = omega_max
+        self.pad_id, self.bos_id, self.eos_id = pad_id, bos_id, eos_id
+        self.use_attn_pool = use_attn_pool
+
+        self.pool_lin = nn.Linear(cond_dim, cond_dim)
+        self.pool_v = nn.Linear(cond_dim, 1, bias=False)
+
+        self.prompt_mlp = nn.Sequential(
+            nn.Linear(cond_dim, prompt_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(prompt_hidden_dim, self.profile_rank + 1),
+        )
+        init.zeros_(self.prompt_mlp[-1].weight)
+        init.zeros_(self.prompt_mlp[-1].bias)
+
+        self.step_bias = nn.Parameter(torch.zeros(self.schedule_steps))
+        self.profile_basis = nn.Parameter(self._init_profile_basis())
+
+    def _init_profile_basis(self) -> torch.Tensor:
+        grid = torch.linspace(-1.0, 1.0, self.schedule_steps, dtype=torch.float32)
+        basis: list[torch.Tensor] = [grid]
+
+        if self.profile_rank >= 2:
+            quad = grid.square()
+            basis.append(quad - quad.mean())
+        if self.profile_rank >= 3:
+            basis.append(torch.sin(0.5 * math.pi * (grid + 1.0)))
+        if self.profile_rank >= 4:
+            basis.append(torch.sign(grid) * torch.sqrt(grid.abs().clamp_min(1e-6)))
+
+        while len(basis) < self.profile_rank:
+            freq = len(basis) + 1
+            basis.append(torch.sin(freq * math.pi * grid))
+
+        profile = torch.stack(basis[:self.profile_rank], dim=0)
+        profile = profile / profile.abs().amax(dim=1, keepdim=True).clamp_min(1e-6)
+        return 0.1 * profile
+
+    def _make_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+        mask = torch.ones_like(input_ids, dtype=torch.bool)
+        if self.pad_id is not None:
+            mask &= (input_ids != self.pad_id)
+        if self.bos_id is not None:
+            mask &= (input_ids != self.bos_id)
+        return mask
+
+    def _pool_tokens(self, hidden_cond: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        if not self.use_attn_pool and self.eos_id is not None:
+            pos = (input_ids == self.eos_id).int().argmax(dim=1)
+            b = torch.arange(input_ids.size(0), device=input_ids.device)
+            return hidden_cond[b, pos, :]
+
+        mask = self._make_mask(input_ids)
+        h = torch.tanh(self.pool_lin(hidden_cond))
+        scores = self.pool_v(h).squeeze(-1)
+        scores = scores.masked_fill(~mask, float("-inf"))
+        weights = torch.softmax(scores, dim=1)
+        return (hidden_cond * weights.unsqueeze(-1)).sum(dim=1)
+
+    def _resolve_step_index(self, timestep_index: int | torch.Tensor | None, timestep: torch.Tensor) -> int:
+        if timestep_index is None:
+            if torch.is_tensor(timestep):
+                timestep_index = int(timestep.flatten()[0].item())
+            else:
+                timestep_index = int(timestep)
+        elif torch.is_tensor(timestep_index):
+            timestep_index = int(timestep_index.flatten()[0].item())
+
+        return max(0, min(int(timestep_index), self.schedule_steps - 1))
+
+    def forward(
+            self,
+            *,
+            encoder_hidden_states: torch.Tensor,
+            input_ids: torch.Tensor,
+            timestep: torch.Tensor,
+            timestep_index: int | torch.Tensor | None = None,
+            **_,
+    ) -> torch.Tensor:
+        batch_size = input_ids.size(0)
+        if encoder_hidden_states.size(0) == 2 * batch_size:
+            _, hidden_cond = encoder_hidden_states.chunk(2)
+        else:
+            hidden_cond = encoder_hidden_states
+
+        cond_embed = self._pool_tokens(hidden_cond, input_ids)
+        prompt_params = self.prompt_mlp(cond_embed.float())
+        prompt_bias = prompt_params[:, :1]
+        prompt_coeffs = prompt_params[:, 1:]
+
+        step_index = self._resolve_step_index(timestep_index=timestep_index, timestep=timestep)
+        basis_at_step = self.profile_basis[:, step_index].unsqueeze(0)
+        step_bias = self.step_bias[step_index].view(1, 1)
+
+        delta = prompt_bias + step_bias + (prompt_coeffs * basis_at_step).sum(dim=-1, keepdim=True)
+        omega = self.base_scale + self.delta_scale * delta
+        if self.omega_min is not None or self.omega_max is not None:
+            omega = omega.clamp(min=self.omega_min, max=self.omega_max)
+        return omega.to(cond_embed.dtype)
+
+
 class StableDiffusion(BaseModel):
     """
     A Stable Diffusion model wrapper that provides functionality for text-to-image synthesis,
@@ -164,6 +299,9 @@ class StableDiffusion(BaseModel):
             guidance_policy_prior_end: float = 5.5,
             guidance_policy_stochastic_train: bool = True,
             guidance_policy_stochastic_eval: bool = False,
+            guidance_profile_steps: int = 40,
+            guidance_profile_rank: int = 2,
+            guidance_profile_hidden_dim: int = 256,
             negative_prompt: str = "",
             use_ema: bool = False,
             use_lora: bool = False,
@@ -296,6 +434,21 @@ class StableDiffusion(BaseModel):
                 stochastic_eval=guidance_policy_stochastic_eval,
                 pad_id=getattr(self.tokenizer, "pad_token_id", None),
                 bos_id=getattr(self.tokenizer, "bos_token_id", None),
+                use_attn_pool=True,
+            )
+        elif guidance_net_type == "prompt_profile":
+            self.guidance_net = PromptProfileGuidanceNet(
+                cond_dim=self.text_encoder.config.hidden_size,
+                schedule_steps=guidance_profile_steps,
+                prompt_hidden_dim=guidance_profile_hidden_dim,
+                profile_rank=guidance_profile_rank,
+                base_scale=self.guidance_scale,
+                delta_scale=guidance_delta_scale,
+                omega_min=guidance_omega_min,
+                omega_max=guidance_omega_max,
+                pad_id=getattr(self.tokenizer, "pad_token_id", None),
+                bos_id=getattr(self.tokenizer, "bos_token_id", None),
+                eos_id=getattr(self.tokenizer, "eos_token_id", None),
                 use_attn_pool=True,
             )
         else:
