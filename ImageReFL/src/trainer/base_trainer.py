@@ -170,6 +170,15 @@ class BaseTrainer:
 
     def _get_train_loss_names(self):
         train_loss_names = [self.train_reward_model.model_suffix]
+        dense_anchor_steps = self.cfg_trainer.get("dense_reward_anchor_steps", None)
+        if dense_anchor_steps:
+            for anchor_step in dense_anchor_steps:
+                anchor_name = f"{self.train_reward_model.model_suffix}_anchor_{int(anchor_step)}"
+                if anchor_name not in train_loss_names:
+                    train_loss_names.append(anchor_name)
+            dense_total_name = f"{self.train_reward_model.model_suffix}_dense_total"
+            if dense_total_name not in train_loss_names:
+                train_loss_names.append(dense_total_name)
         component_names = getattr(
             self.train_reward_model, "component_model_suffixes", []
         )
@@ -184,7 +193,11 @@ class BaseTrainer:
             reward_model.model_suffix for reward_model in self.val_reward_models
         ]
         for reward_name in self._get_train_loss_names():
-            if reward_name != "loss" and reward_name not in evaluation_loss_names:
+            if reward_name == "loss":
+                continue
+            if "_anchor_" in reward_name or reward_name.endswith("_dense_total"):
+                continue
+            if reward_name not in evaluation_loss_names:
                 evaluation_loss_names.append(reward_name)
         return evaluation_loss_names
 
@@ -343,9 +356,7 @@ class BaseTrainer:
 
             if self.config.trainer.get("requires_score_grad", False):
                 # Считаем reward без автокаста, чтобы сохранить точность CLIP/HPS
-                self.train_reward_model.score_grad(
-                    batch=batch,
-                )
+                self._score_train_batch(batch=batch)
 
                 # print('total loss', batch['loss'])
                 batch["loss"] = batch["loss"] * self.cfg_trainer.loss_scale
@@ -366,6 +377,9 @@ class BaseTrainer:
                 )
 
         return batch
+
+    def _score_train_batch(self, batch: dict[str, torch.Tensor]) -> None:
+        self.train_reward_model.score_grad(batch=batch)
 
     def _train_epoch(self, epoch):
         """
@@ -544,6 +558,9 @@ class BaseTrainer:
                     batch_idx, collate_fn(first_batches), part
                 )
                 self._log_fixed_prompt_images(epoch=epoch, part=part)
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         self._barrier()
         return self.evaluation_metrics.result()

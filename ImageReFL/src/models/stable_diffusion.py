@@ -774,6 +774,27 @@ class StableDiffusion(BaseModel):
             sample.pred_original_sample if return_pred_original else sample.prev_sample
         )
 
+    def sample_next_latents_and_pred_original(
+            self,
+            latents: torch.Tensor,
+            timestep_index: int,
+            noise_pred: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return both next latents and the predicted x0 sample for the same scheduler step.
+        Useful for dense reward supervision on intermediate denoising anchors.
+        """
+        timestep = self.timesteps[timestep_index]
+        try:
+            sample = self.noise_scheduler.step(
+                model_output=noise_pred, timestep=timestep, sample=latents, eta=0.0
+            )
+        except TypeError:
+            sample = self.noise_scheduler.step(
+                model_output=noise_pred, timestep=timestep, sample=latents
+            )
+        return sample.prev_sample, sample.pred_original_sample
+
     def predict_next_latents(
             self,
             latents: torch.Tensor,
