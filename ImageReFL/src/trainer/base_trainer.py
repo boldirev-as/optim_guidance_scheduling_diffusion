@@ -172,13 +172,25 @@ class BaseTrainer:
         train_loss_names = [self.train_reward_model.model_suffix]
         dense_anchor_steps = self.cfg_trainer.get("dense_reward_anchor_steps", None)
         if dense_anchor_steps:
+            use_advantage = bool(self.cfg_trainer.get("dense_reward_use_advantage", False))
             for anchor_step in dense_anchor_steps:
                 anchor_name = f"{self.train_reward_model.model_suffix}_anchor_{int(anchor_step)}"
                 if anchor_name not in train_loss_names:
                     train_loss_names.append(anchor_name)
+                if use_advantage:
+                    ref_anchor_name = f"{self.train_reward_model.model_suffix}_ref_anchor_{int(anchor_step)}"
+                    adv_anchor_name = f"{self.train_reward_model.model_suffix}_adv_anchor_{int(anchor_step)}"
+                    if ref_anchor_name not in train_loss_names:
+                        train_loss_names.append(ref_anchor_name)
+                    if adv_anchor_name not in train_loss_names:
+                        train_loss_names.append(adv_anchor_name)
             dense_total_name = f"{self.train_reward_model.model_suffix}_dense_total"
             if dense_total_name not in train_loss_names:
                 train_loss_names.append(dense_total_name)
+            if use_advantage:
+                adv_total_name = f"{self.train_reward_model.model_suffix}_adv_total"
+                if adv_total_name not in train_loss_names:
+                    train_loss_names.append(adv_total_name)
         component_names = getattr(
             self.train_reward_model, "component_model_suffixes", []
         )
@@ -195,7 +207,11 @@ class BaseTrainer:
         for reward_name in self._get_train_loss_names():
             if reward_name == "loss":
                 continue
-            if "_anchor_" in reward_name or reward_name.endswith("_dense_total"):
+            if (
+                    "_anchor_" in reward_name
+                    or reward_name.endswith("_dense_total")
+                    or reward_name.endswith("_adv_total")
+            ):
                 continue
             if reward_name not in evaluation_loss_names:
                 evaluation_loss_names.append(reward_name)

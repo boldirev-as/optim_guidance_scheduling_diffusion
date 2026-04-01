@@ -633,7 +633,9 @@ class StableDiffusion(BaseModel):
             timestep_index: int,
             encoder_hidden_states: torch.Tensor,
             do_classifier_free_guidance: bool = False,
-            detach_main_path: bool = False
+            detach_main_path: bool = False,
+            guidance_override: float | None = None,
+            record_omega_schedule: bool = True,
     ):
         """
         Return noise prediction
@@ -674,6 +676,19 @@ class StableDiffusion(BaseModel):
 
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+            if guidance_override is not None:
+                if record_omega_schedule and self.omega_schedule is not None:
+                    omega_stub = torch.tensor(
+                        [[[[guidance_override]]]],
+                        device=latents.device,
+                        dtype=latents.dtype,
+                    )
+                    self.omega_schedule.append(omega_stub.detach().float().cpu())
+                noise_pred = noise_pred_uncond + guidance_override * (
+                        noise_pred_text - noise_pred_uncond
+                )
+                return noise_pred
 
             if self.guidance_net is not None and self.do_guidance_w_loss:
                 min_step = batch.get("guidance_min_step", 0)
@@ -716,7 +731,8 @@ class StableDiffusion(BaseModel):
 
                     self.last_omegas = omega
                     self.omegas_history.append(omega.detach())
-                    self.omega_schedule.append(omega.detach().float().cpu())
+                    if record_omega_schedule:
+                        self.omega_schedule.append(omega.detach().float().cpu())
 
                     if detach_main_path:
                         noise_pred_uncond = noise_pred_uncond.detach()
@@ -726,7 +742,7 @@ class StableDiffusion(BaseModel):
                         noise_pred = noise_pred_uncond + omega * (noise_pred_text - noise_pred_uncond)
 
                 else:
-                    if self.omega_schedule is not None:
+                    if record_omega_schedule and self.omega_schedule is not None:
                         omega_stub = torch.tensor(
                             [[[[self.guidance_scale]]]],
                             device=latents.device,

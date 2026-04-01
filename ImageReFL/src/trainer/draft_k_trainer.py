@@ -38,6 +38,51 @@ class DraftKTrainer(BaseTrainer):
     def _has_dense_reward(self) -> bool:
         return len(self._get_dense_anchor_steps()) > 0
 
+    def _use_dense_advantage(self) -> bool:
+        return bool(self.cfg_trainer.get("dense_reward_use_advantage", False))
+
+    def _collect_anchor_images(
+            self,
+            batch: dict[str, torch.Tensor],
+            latents: torch.Tensor,
+            encoder_hidden_states: torch.Tensor,
+            start_timestep_index: int,
+            end_timestep_index: int,
+            anchor_steps: list[int],
+            guidance_override: float | None = None,
+            record_omega_schedule: bool = True,
+    ) -> tuple[dict[int, torch.Tensor], torch.Tensor]:
+        anchor_images: dict[int, torch.Tensor] = {}
+        current_latents = latents
+        final_reward_image = None
+
+        for timestep_index in range(start_timestep_index, end_timestep_index):
+            noise_pred = self.model.get_noise_prediction(
+                batch=batch,
+                latents=current_latents,
+                timestep_index=timestep_index,
+                encoder_hidden_states=encoder_hidden_states,
+                do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
+                detach_main_path=self.cfg_trainer.detach_main_path,
+                guidance_override=guidance_override,
+                record_omega_schedule=record_omega_schedule,
+            )
+            current_latents, pred_original_sample = self.model.sample_next_latents_and_pred_original(
+                latents=current_latents,
+                timestep_index=timestep_index,
+                noise_pred=noise_pred,
+            )
+            anchor_step = timestep_index + 1
+            if anchor_step in anchor_steps:
+                pred_original_sample = pred_original_sample / self.model.vae.config.scaling_factor
+                raw_image = self.model.vae.decode(pred_original_sample).sample
+                reward_image = self.model.get_reward_image(raw_image)
+                anchor_images[anchor_step] = reward_image
+                if anchor_step == anchor_steps[-1]:
+                    final_reward_image = reward_image
+
+        return anchor_images, final_reward_image
+
     def _sample_image_train(self, batch: dict[str, torch.Tensor]):
         total_steps = self.cfg_trainer.first_steps_count + self.cfg_trainer.k_steps
         self.model.set_timesteps(
@@ -76,33 +121,30 @@ class DraftKTrainer(BaseTrainer):
             return
 
         anchor_steps = self._get_dense_anchor_steps()
-        anchor_images: dict[int, torch.Tensor] = {}
-        current_latents = latents
-
-        for timestep_index in range(no_grad_steps, grad_steps):
-            noise_pred = self.model.get_noise_prediction(
-                latents=current_latents,
-                timestep_index=timestep_index,
-                encoder_hidden_states=encoder_hidden_states,
-                do_classifier_free_guidance=self.cfg_trainer.do_classifier_free_guidance,
-                detach_main_path=self.cfg_trainer.detach_main_path,
-                batch=batch,
-            )
-            current_latents, pred_original_sample = self.model.sample_next_latents_and_pred_original(
-                latents=current_latents,
-                timestep_index=timestep_index,
-                noise_pred=noise_pred,
-            )
-            anchor_step = timestep_index + 1
-            if anchor_step in anchor_steps:
-                pred_original_sample = pred_original_sample / self.model.vae.config.scaling_factor
-                raw_image = self.model.vae.decode(pred_original_sample).sample
-                reward_image = self.model.get_reward_image(raw_image)
-                anchor_images[anchor_step] = reward_image
-                if anchor_step == anchor_steps[-1]:
-                    batch["image"] = reward_image
-
+        anchor_images, final_reward_image = self._collect_anchor_images(
+            batch=batch,
+            latents=latents,
+            encoder_hidden_states=encoder_hidden_states,
+            start_timestep_index=no_grad_steps,
+            end_timestep_index=grad_steps,
+            anchor_steps=anchor_steps,
+        )
+        batch["image"] = final_reward_image
         batch["dense_reward_images"] = anchor_images
+
+        if self._use_dense_advantage():
+            with torch.no_grad():
+                ref_anchor_images, _ = self._collect_anchor_images(
+                    batch=batch,
+                    latents=latents.detach(),
+                    encoder_hidden_states=encoder_hidden_states,
+                    start_timestep_index=no_grad_steps,
+                    end_timestep_index=grad_steps,
+                    anchor_steps=anchor_steps,
+                    guidance_override=float(self.model.guidance_scale),
+                    record_omega_schedule=False,
+                )
+            batch["dense_reward_ref_images"] = ref_anchor_images
 
     def _score_train_batch(self, batch: dict[str, torch.Tensor]) -> None:
         if not self._has_dense_reward():
@@ -116,8 +158,11 @@ class DraftKTrainer(BaseTrainer):
 
         anchor_steps = self._get_dense_anchor_steps()
         anchor_weights = self._get_dense_anchor_weights(anchor_steps)
+        use_advantage = self._use_dense_advantage()
+        ref_anchor_images = batch.pop("dense_reward_ref_images", None) if use_advantage else None
 
         total_reward = 0.0
+        total_advantage = 0.0
         final_anchor_step = anchor_steps[-1]
         final_reward = None
         final_clipped_reward = None
@@ -126,16 +171,30 @@ class DraftKTrainer(BaseTrainer):
             image = anchor_images[anchor_step].float()
             reward = self.train_reward_model._get_reward(batch, image)
             clipped_reward = self.train_reward_model._clip_reward(reward)
-
-            batch["loss"] += (
-                -(reward + self.train_reward_model.reward_offset)
-                * self.train_reward_model.reward_scale_factor
-                * anchor_weight
-            ).mean()
-
             reward_mean = reward.mean().detach()
             batch[f"{self.train_reward_model.model_suffix}_anchor_{anchor_step}"] = reward_mean
             total_reward = total_reward + anchor_weight * reward_mean.item()
+
+            loss_reward = reward
+            if use_advantage:
+                if ref_anchor_images is None or anchor_step not in ref_anchor_images:
+                    raise ValueError("dense_reward_ref_images are required when dense_reward_use_advantage is enabled")
+                ref_image = ref_anchor_images[anchor_step].float()
+                with torch.no_grad():
+                    ref_reward = self.train_reward_model._get_reward(batch, ref_image)
+                ref_reward_mean = ref_reward.mean().detach()
+                advantage = reward - ref_reward
+                advantage_mean = advantage.mean().detach()
+                loss_reward = advantage
+                batch[f"{self.train_reward_model.model_suffix}_ref_anchor_{anchor_step}"] = ref_reward_mean
+                batch[f"{self.train_reward_model.model_suffix}_adv_anchor_{anchor_step}"] = advantage_mean
+                total_advantage = total_advantage + anchor_weight * advantage_mean.item()
+
+            batch["loss"] += (
+                -(loss_reward + self.train_reward_model.reward_offset)
+                * self.train_reward_model.reward_scale_factor
+                * anchor_weight
+            ).mean()
 
             if anchor_step == final_anchor_step:
                 final_reward = reward_mean
@@ -146,6 +205,10 @@ class DraftKTrainer(BaseTrainer):
         batch[f"{self.train_reward_model.model_suffix}_dense_total"] = torch.tensor(
             total_reward, device=self.device
         )
+        if use_advantage:
+            batch[f"{self.train_reward_model.model_suffix}_adv_total"] = torch.tensor(
+                total_advantage, device=self.device
+            )
         if final_clipped_reward is not None:
             batch[f"{self.train_reward_model.model_suffix}_clipped_mean"] = final_clipped_reward.mean()
             batch[f"{self.train_reward_model.model_suffix}_clipped_min"] = final_clipped_reward.min()
