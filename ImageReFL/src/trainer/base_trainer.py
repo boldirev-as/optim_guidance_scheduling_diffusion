@@ -810,6 +810,11 @@ class BaseTrainer:
                         label=f"{mode}_fixed_prompt_{prompt_idx}_guidance_schedule_seed_{fixed_seed}",
                     )
             else:
+                # Semantic router schedule logging is already covered by fixed prompts
+                # during evaluation. Running the same full diffusion loop inside train
+                # is both very expensive and requires raw captions in the logging batch.
+                if mode == "train" and getattr(self.model, "_is_semantic_router_active", lambda: False)():
+                    return
                 seeds = batch.get("seeds", [self.cfg_trainer.seed])
                 if isinstance(seeds, (int, float)):
                     seeds = [int(seeds)]
@@ -820,12 +825,21 @@ class BaseTrainer:
                 tokenized = batch.get(DatasetColumns.tokenized_text.name, None)
                 if tokenized is not None:
                     base_tokens = tokenized[:1].to(self.device)
+                    captions = batch.get("caption", None)
+                    if isinstance(captions, (list, tuple)) and captions:
+                        base_captions = [str(captions[0])]
+                    elif captions is not None:
+                        base_captions = [str(captions)]
+                    else:
+                        base_captions = None
                     for seed in seeds:
                         schedule_batch = {
                             DatasetColumns.tokenized_text.name: base_tokens,
                             "guidance_min_step": self.cfg_trainer.min_mid_timestep,
                             "guidance_max_step": self.cfg_trainer.max_mid_timestep,
                         }
+                        if base_captions is not None:
+                            schedule_batch["caption"] = base_captions
                         _run_schedule_log(
                             schedule_batch=schedule_batch,
                             seed=seed,

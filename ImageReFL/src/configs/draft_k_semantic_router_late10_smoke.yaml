@@ -1,0 +1,89 @@
+defaults:
+  - model: stable_diffusion_15
+  - reward_models: clip_score_hps_diversity
+  - writer: train
+  - datasets: coco_image_prompts_smoke
+  - dataloader: refl
+  - transforms: empty
+  - _self_
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 2e-5
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  weight_decay: 0.01
+
+lr_scheduler: null
+
+writer:
+  run_name: "draftk_semantic_router_smoke"
+
+model:
+  do_guidance_w_loss: True
+  no_grad: True
+  negative_prompt: "blurred, blurry, disfigured, ugly, tiling, poorly drawn"
+  guidance_net_type: semantic_router
+  semantic_router_hidden_dim: 512
+  semantic_router_num_groups: 3
+  semantic_router_alpha_scale: 1.0
+  semantic_router_alpha_activation: tanh
+  noise_scheduler:
+    _target_: diffusers.DDIMScheduler.from_pretrained
+    pretrained_model_name_or_path: ${model.pretrained_model_name}
+    subfolder: scheduler
+
+trainer:
+  type: "DraftK"
+  loss_scale: 1
+  max_grad_norm: 100
+  accumulation_steps: 1
+  num_steps: 40
+  first_steps_count: 30
+  k_steps: 10
+  min_mid_timestep: 30
+  max_mid_timestep: 40
+  dense_reward_anchor_steps: [34, 37, 40]
+  dense_reward_weights: [0.2, 0.3, 0.5]
+  dense_reward_use_advantage: true
+  eval_period: 1
+  log_step: 1
+  n_epochs: 1
+  epoch_len: 1
+  resume_from: null
+  device: auto
+  override: True
+  monitor: "off"
+  save_period: 100
+  save_checkpoints: False
+  early_stop: ${trainer.n_epochs}
+  save_dir: "refl_guidance_loss_saved/"
+  seed: 1
+  mse_loss_scale: 0
+  do_classifier_free_guidance: True
+  detach_main_path: True
+  calculate_initial_model_metrics: True
+  requires_score_grad: True
+  distributed_eval_only: True
+  skip_oom: false
+
+  log_fixed_prompt: true
+  log_batch_images: false
+  log_real_images: false
+  fixed_prompts:
+    - "a photo of a golden retriever sitting on a blue chair, studio lighting"
+    - "a bowl of ramen on a wooden table, top-down, soft natural light"
+    - "a red bicycle leaning against a brick wall, sunny day, 35mm photo"
+    - "a cozy living room with a fireplace and bookshelves, warm lighting"
+    - "a close-up portrait of a woman wearing a red scarf, shallow depth of field"
+  fixed_prompt_seed: 123
+  leak_check_max_samples: 2000
+  leak_check_action: "warn"
+  guidance_reg_lambda: 0.0
+  log_guidance_schedule: True
+  guidance_schedule_log_seeds: 1
+
+reward_models:
+  train_model:
+    reward_scale_factor: 20000.0
+    reward_offset: 0.0
