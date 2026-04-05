@@ -744,6 +744,15 @@ class BaseTrainer:
                 self.writer.add_scalar(f"{mode}_guidance/omega_std", omegas.std().item())
                 self.writer.add_scalar(f"{mode}_guidance/omega_min", omegas.min().item())
                 self.writer.add_scalar(f"{mode}_guidance/omega_max", omegas.max().item())
+            semantic_alphas = getattr(self.model, "last_semantic_alphas", None)
+            semantic_names = getattr(self.model, "semantic_group_names", [])
+            if torch.is_tensor(semantic_alphas) and semantic_alphas.numel() > 0:
+                semantic_alphas = semantic_alphas.float().detach()
+                for group_idx, group_name in enumerate(semantic_names):
+                    self.writer.add_scalar(
+                        f"{mode}_guidance/alpha_{group_name}_mean",
+                        semantic_alphas[:, group_idx].mean().item(),
+                    )
             for key, value in batch.items():
                 if not key.endswith(("_clipped_mean", "_clipped_min", "_clipped_max")):
                     continue
@@ -773,6 +782,13 @@ class BaseTrainer:
                     for x in self.model.omega_schedule[min_step:max_step]
                 ]
                 self.logger.info(f"{label}: {omega_list}")
+                semantic_alpha_schedule = getattr(self.model, "semantic_alpha_schedule", None)
+                if semantic_alpha_schedule:
+                    alpha_list = [
+                        [float(v) for v in step_alphas[0].tolist()]
+                        for step_alphas in semantic_alpha_schedule[min_step:max_step]
+                    ]
+                    self.logger.info(f"{label}_semantic_alphas: {alpha_list}")
 
             fixed_prompts = self.cfg_trainer.get("fixed_prompts", None)
             if isinstance(fixed_prompts, str):
@@ -785,6 +801,7 @@ class BaseTrainer:
                     prompt_batch[DatasetColumns.tokenized_text.name] = prompt_batch[
                         DatasetColumns.tokenized_text.name
                     ].to(self.device)
+                    prompt_batch["caption"] = [fixed_prompt]
                     prompt_batch["guidance_min_step"] = self.cfg_trainer.min_mid_timestep
                     prompt_batch["guidance_max_step"] = self.cfg_trainer.max_mid_timestep
                     _run_schedule_log(
@@ -820,12 +837,12 @@ class BaseTrainer:
         #         f"{mode}_guidance/scale_{i}", guidance_scale
         #     )
 
-        if "image" in batch:
+        if self.cfg_trainer.get("log_batch_images", False) and "image" in batch:
             pil_images = self.model.get_pil_image(batch["image"])
             for i, img in enumerate(pil_images):
                 self.writer.add_image(f"{mode}/{i}", img)
 
-        if DatasetColumns.original_image.name in batch:
+        if self.cfg_trainer.get("log_real_images", False) and DatasetColumns.original_image.name in batch:
             pil_images = self.model.get_pil_image(batch[DatasetColumns.original_image.name])
             for i, img in enumerate(pil_images):
                 self.writer.add_image(f"{mode}_real/{i}", img)
@@ -857,16 +874,12 @@ class BaseTrainer:
             fixed_prompts = [fixed_prompts]
         seed = int(self.cfg_trainer.get("fixed_prompt_seed", self.cfg_trainer.seed))
 
-        if epoch == self.start_epoch - 1:
-            tag = "init"
-        else:
-            tag = f"epoch_{epoch}"
-
         for idx, fixed_prompt in enumerate(fixed_prompts, start=1):
             prompt_batch = self.model.tokenize(fixed_prompt)
             prompt_batch[DatasetColumns.tokenized_text.name] = prompt_batch[
                 DatasetColumns.tokenized_text.name
             ].to(self.device)
+            prompt_batch["caption"] = [fixed_prompt]
             prompt_batch["seeds"] = [seed]
 
             reward_image, raw_image = self.model.sample_image_with_raw(
@@ -883,7 +896,8 @@ class BaseTrainer:
             if not pil_images:
                 continue
 
-            name = f"{part}_fixed_prompt/{idx}/{tag}"
+            # Keep a stable key across epochs so WandB can show a slider over time.
+            name = f"fixed_prompt/{idx}"
             self.writer.add_image(name, pil_images[0])
 
     def _save_checkpoint(self, epoch, save_best=False, only_best=False):

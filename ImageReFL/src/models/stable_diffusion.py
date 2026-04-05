@@ -16,6 +16,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from src.constants.dataset import DatasetColumns
 from src.models.base_model import BaseModel
 from src.models.guidance_policy_net import RCSGPGuidanceNet
+from src.utils.prompt_decomposition import SEMANTIC_GROUP_NAMES, build_semantic_degraded_prompts
 
 from collections import deque
 
@@ -276,6 +277,124 @@ class PromptProfileGuidanceNet(nn.Module):
         return omega.to(cond_embed.dtype)
 
 
+class SemanticResidualRouterGuidanceNet(nn.Module):
+    """
+    Predicts prompt- and timestep-dependent coefficients for semantic residual bases
+    derived from degraded prompt variants.
+    """
+
+    def __init__(
+            self,
+            cond_dim: int,
+            time_emb_dim: int = 32,
+            hidden_dim: int = 512,
+            num_groups: int = 3,
+            alpha_scale: float = 1.0,
+            alpha_activation: str = "tanh",
+            pad_id: int | None = None,
+            bos_id: int | None = None,
+            eos_id: int | None = None,
+            use_attn_pool: bool = True,
+    ):
+        super().__init__()
+        if num_groups <= 0:
+            raise ValueError("num_groups must be > 0")
+
+        self.num_groups = int(num_groups)
+        self.alpha_scale = float(alpha_scale)
+        self.alpha_activation = str(alpha_activation).lower()
+        self.pad_id, self.bos_id, self.eos_id = pad_id, bos_id, eos_id
+        self.use_attn_pool = use_attn_pool
+
+        self.pool_lin = nn.Linear(cond_dim, cond_dim)
+        self.pool_v = nn.Linear(cond_dim, 1, bias=False)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(cond_dim + time_emb_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, self.num_groups),
+        )
+        init.zeros_(self.mlp[-1].weight)
+        init.zeros_(self.mlp[-1].bias)
+
+    def _make_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+        mask = torch.ones_like(input_ids, dtype=torch.bool)
+        if self.pad_id is not None:
+            mask &= (input_ids != self.pad_id)
+        if self.bos_id is not None:
+            mask &= (input_ids != self.bos_id)
+        return mask
+
+    def _pool_tokens(self, hidden_cond: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        if not self.use_attn_pool and self.eos_id is not None:
+            pos = (input_ids == self.eos_id).int().argmax(dim=1)
+            batch_idx = torch.arange(input_ids.size(0), device=input_ids.device)
+            return hidden_cond[batch_idx, pos, :]
+
+        mask = self._make_mask(input_ids)
+        h = torch.tanh(self.pool_lin(hidden_cond))
+        scores = self.pool_v(h).squeeze(-1)
+        scores = scores.masked_fill(~mask, float("-inf"))
+        weights = torch.softmax(scores, dim=1)
+        return (hidden_cond * weights.unsqueeze(-1)).sum(dim=1)
+
+    def _time_embed(self, unet, sample, timestep, timestep_cond=None,
+                    encoder_hidden_states=None, added_cond_kwargs=None):
+        t_emb = unet.get_time_embed(sample=sample, timestep=timestep)
+        emb = unet.time_embedding(t_emb, timestep_cond)
+        aug_emb = unet.get_aug_embed(
+            emb=emb,
+            encoder_hidden_states=encoder_hidden_states,
+            added_cond_kwargs=added_cond_kwargs,
+        )
+        if unet.config.addition_embed_type == "image_hint":
+            aug_emb, _ = aug_emb
+        emb = emb + aug_emb if aug_emb is not None else emb
+        if unet.time_embed_act is not None:
+            emb = unet.time_embed_act(emb)
+        return emb
+
+    def _activate(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.alpha_activation == "relu":
+            return self.alpha_scale * torch.relu(logits)
+        if self.alpha_activation == "softplus":
+            return self.alpha_scale * torch.nn.functional.softplus(logits)
+        return self.alpha_scale * torch.tanh(logits)
+
+    def forward(
+            self,
+            *,
+            unet,
+            encoder_hidden_states: torch.Tensor,
+            input_ids: torch.Tensor,
+            sample: torch.Tensor,
+            timestep: torch.Tensor,
+            timestep_cond: torch.Tensor | None = None,
+            added_cond_kwargs: dict | None = None,
+            **_,
+    ) -> torch.Tensor:
+        batch_size = input_ids.size(0)
+        if encoder_hidden_states.size(0) == 2 * batch_size:
+            _, hidden_cond = encoder_hidden_states.chunk(2)
+        else:
+            hidden_cond = encoder_hidden_states
+
+        cond_embed = self._pool_tokens(hidden_cond, input_ids)
+        emb = self._time_embed(
+            unet=unet,
+            sample=sample,
+            timestep=timestep,
+            timestep_cond=timestep_cond,
+            encoder_hidden_states=hidden_cond,
+            added_cond_kwargs=added_cond_kwargs,
+        )
+
+        logits = self.mlp(torch.cat([cond_embed, emb], dim=-1))
+        return self._activate(logits).to(cond_embed.dtype)
+
+
 class StableDiffusion(BaseModel):
     """
     A Stable Diffusion model wrapper that provides functionality for text-to-image synthesis,
@@ -302,6 +421,10 @@ class StableDiffusion(BaseModel):
             guidance_profile_steps: int = 40,
             guidance_profile_rank: int = 2,
             guidance_profile_hidden_dim: int = 256,
+            semantic_router_hidden_dim: int = 512,
+            semantic_router_num_groups: int = 3,
+            semantic_router_alpha_scale: float = 1.0,
+            semantic_router_alpha_activation: str = "tanh",
             negative_prompt: str = "",
             use_ema: bool = False,
             use_lora: bool = False,
@@ -410,7 +533,10 @@ class StableDiffusion(BaseModel):
         self.last_omegas = []
         self.omegas_history = deque(maxlen=10)
         self.omega_schedule: list[torch.Tensor] = []
+        self.semantic_alpha_schedule: list[torch.Tensor] = []
+        self.last_semantic_alphas: torch.Tensor | None = None
         self.guidance_net_type = guidance_net_type
+        self.semantic_group_names = SEMANTIC_GROUP_NAMES[:semantic_router_num_groups]
 
         guidance_net_type = str(guidance_net_type).lower()
         if guidance_net_type == "rcsgp":
@@ -446,6 +572,19 @@ class StableDiffusion(BaseModel):
                 delta_scale=guidance_delta_scale,
                 omega_min=guidance_omega_min,
                 omega_max=guidance_omega_max,
+                pad_id=getattr(self.tokenizer, "pad_token_id", None),
+                bos_id=getattr(self.tokenizer, "bos_token_id", None),
+                eos_id=getattr(self.tokenizer, "eos_token_id", None),
+                use_attn_pool=True,
+            )
+        elif guidance_net_type == "semantic_router":
+            self.guidance_net = SemanticResidualRouterGuidanceNet(
+                cond_dim=self.text_encoder.config.hidden_size,
+                time_emb_dim=self.unet.time_embedding.linear_2.out_features,
+                hidden_dim=semantic_router_hidden_dim,
+                num_groups=semantic_router_num_groups,
+                alpha_scale=semantic_router_alpha_scale,
+                alpha_activation=semantic_router_alpha_activation,
                 pad_id=getattr(self.tokenizer, "pad_token_id", None),
                 bos_id=getattr(self.tokenizer, "bos_token_id", None),
                 eos_id=getattr(self.tokenizer, "eos_token_id", None),
@@ -525,6 +664,55 @@ class StableDiffusion(BaseModel):
         return {
             DatasetColumns.tokenized_text.name: input_ids,
         }
+
+    def _is_semantic_router_active(self) -> bool:
+        return str(self.guidance_net_type).lower() == "semantic_router"
+
+    def _build_semantic_router_context(
+            self,
+            batch: dict[str, tp.Any],
+            device: torch.device,
+    ) -> dict[str, tp.Any] | None:
+        if not self._is_semantic_router_active():
+            return None
+
+        cached = batch.get("_semantic_router_context", None)
+        if cached is not None and cached.get("device") == str(device):
+            return cached
+
+        captions = batch.get("caption", None)
+        if not captions:
+            return None
+
+        degraded_captions = {name: [] for name in self.semantic_group_names}
+        for caption in captions:
+            degraded = build_semantic_degraded_prompts(str(caption))
+            for group_name in self.semantic_group_names:
+                degraded_captions[group_name].append(degraded[group_name])
+
+        tokenized_inputs: dict[str, torch.Tensor] = {}
+        encoder_states: dict[str, torch.Tensor] = {}
+        with torch.no_grad():
+            for group_name, prompts in degraded_captions.items():
+                input_ids = self.tokenizer(
+                    prompts,
+                    max_length=self.tokenizer.model_max_length,
+                    padding="max_length",
+                    truncation=True,
+                    return_tensors="pt",
+                ).input_ids.to(device)
+                tokenized_inputs[group_name] = input_ids
+                encoder_states[group_name] = self.text_encoder(input_ids)[0]
+
+        context = {
+            "device": str(device),
+            "group_names": list(self.semantic_group_names),
+            "tokenized_inputs": tokenized_inputs,
+            "encoder_states": encoder_states,
+            "degraded_captions": degraded_captions,
+        }
+        batch["_semantic_router_context"] = context
+        return context
 
     def set_timesteps(self, max_timestep: int, device) -> None:
         """
@@ -712,11 +900,11 @@ class StableDiffusion(BaseModel):
                         prev_omega = self.last_omegas.reshape(batch_size, -1)[:, :1].detach()
 
                     with torch.cuda.amp.autocast(enabled=False):
-                        omega = self.guidance_net(
+                        router_output = self.guidance_net(
                             unet=self.unet,
-                            encoder_hidden_states=enc_for_guidance,  # [2B,L,D] ок
-                            input_ids=batch[DatasetColumns.tokenized_text.name],  # [B,L]
-                            sample=sample_for_guidance,  # cond-вход UNet
+                            encoder_hidden_states=enc_for_guidance,
+                            input_ids=batch[DatasetColumns.tokenized_text.name],
+                            sample=sample_for_guidance,
                             timestep=timestep,
                             timestep_cond=None,
                             added_cond_kwargs=None,
@@ -725,21 +913,73 @@ class StableDiffusion(BaseModel):
                             prev_omega=prev_omega,
                             timestep_index=timestep_index,
                         )
-                        # omega = self.guidance_net(cond_embed, t_index)
 
-                    omega = omega.view(batch_size, 1, 1, 1).to(latents.dtype)
+                    if self._is_semantic_router_active():
+                        semantic_context = self._build_semantic_router_context(
+                            batch=batch, device=latents.device
+                        )
+                        if semantic_context is None:
+                            raise ValueError("Semantic router requires raw captions in the batch.")
 
-                    self.last_omegas = omega
-                    self.omegas_history.append(omega.detach())
-                    if record_omega_schedule:
-                        self.omega_schedule.append(omega.detach().float().cpu())
+                        alphas = router_output.to(latents.dtype)
+                        if detach_main_path:
+                            noise_pred_uncond = noise_pred_uncond.detach()
+                            noise_pred_text = noise_pred_text.detach()
 
-                    if detach_main_path:
-                        noise_pred_uncond = noise_pred_uncond.detach()
-                        delta = (noise_pred_text - noise_pred_uncond).detach()
-                        noise_pred = noise_pred_uncond + omega * delta
+                        cfg_delta = noise_pred_text - noise_pred_uncond
+                        noise_pred = noise_pred_uncond + self.guidance_scale * cfg_delta
+
+                        semantic_delta = torch.zeros_like(noise_pred)
+                        _, latent_model_input_cond = latent_model_input.chunk(2)
+                        latent_model_input_cond = latent_model_input_cond.detach() if detach_main_path else latent_model_input_cond
+
+                        for group_idx, group_name in enumerate(semantic_context["group_names"]):
+                            degraded_hidden_states = semantic_context["encoder_states"][group_name]
+                            if detach_main_path:
+                                with torch.no_grad():
+                                    noise_pred_degraded = self._get_unet_prediction(
+                                        latent_model_input=latent_model_input_cond,
+                                        timestep=timestep,
+                                        encoder_hidden_states=degraded_hidden_states,
+                                    )
+                            else:
+                                noise_pred_degraded = self._get_unet_prediction(
+                                    latent_model_input=latent_model_input_cond,
+                                    timestep=timestep,
+                                    encoder_hidden_states=degraded_hidden_states,
+                                )
+                            basis_delta = noise_pred_text - noise_pred_degraded
+                            if detach_main_path:
+                                basis_delta = basis_delta.detach()
+                            alpha = alphas[:, group_idx].view(batch_size, 1, 1, 1)
+                            semantic_delta = semantic_delta + alpha * basis_delta
+
+                        noise_pred = noise_pred + semantic_delta
+
+                        effective_omega = (
+                            self.guidance_scale + alphas.sum(dim=-1, keepdim=True)
+                        ).view(batch_size, 1, 1, 1)
+                        self.last_omegas = effective_omega
+                        self.last_semantic_alphas = alphas.detach()
+                        self.omegas_history.append(effective_omega.detach())
+                        if record_omega_schedule:
+                            self.omega_schedule.append(effective_omega.detach().float().cpu())
+                            self.semantic_alpha_schedule.append(alphas.detach().float().cpu())
                     else:
-                        noise_pred = noise_pred_uncond + omega * (noise_pred_text - noise_pred_uncond)
+                        omega = router_output.view(batch_size, 1, 1, 1).to(latents.dtype)
+
+                        self.last_omegas = omega
+                        self.last_semantic_alphas = None
+                        self.omegas_history.append(omega.detach())
+                        if record_omega_schedule:
+                            self.omega_schedule.append(omega.detach().float().cpu())
+
+                        if detach_main_path:
+                            noise_pred_uncond = noise_pred_uncond.detach()
+                            delta = (noise_pred_text - noise_pred_uncond).detach()
+                            noise_pred = noise_pred_uncond + omega * delta
+                        else:
+                            noise_pred = noise_pred_uncond + omega * (noise_pred_text - noise_pred_uncond)
 
                 else:
                     if record_omega_schedule and self.omega_schedule is not None:
@@ -749,6 +989,13 @@ class StableDiffusion(BaseModel):
                             dtype=latents.dtype,
                         )
                         self.omega_schedule.append(omega_stub.detach().float().cpu())
+                        if self._is_semantic_router_active():
+                            zero_alphas = torch.zeros(
+                                (latents.shape[0], len(self.semantic_group_names)),
+                                device=latents.device,
+                                dtype=latents.dtype,
+                            )
+                            self.semantic_alpha_schedule.append(zero_alphas.detach().float().cpu())
                     noise_pred = noise_pred_uncond + self.guidance_scale * (
                             noise_pred_text - noise_pred_uncond
                     )
@@ -920,6 +1167,8 @@ class StableDiffusion(BaseModel):
         if do_classifier_free_guidance and self.do_guidance_w_loss:
             self.omega_schedule = []
             self.last_omegas = []
+            self.semantic_alpha_schedule = []
+            self.last_semantic_alphas = None
             if hasattr(self.guidance_net, "reset_step_infos"):
                 self.guidance_net.reset_step_infos()
 
