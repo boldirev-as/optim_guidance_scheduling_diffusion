@@ -220,6 +220,15 @@ class PromptProfileGuidanceNet(nn.Module):
             mask &= (input_ids != self.pad_id)
         if self.bos_id is not None:
             mask &= (input_ids != self.bos_id)
+        if not mask.all():
+            # CLIP tokenizer for SD uses eos == pad. For short prompts or aggressive
+            # degraded prompts this can mask out every token and produce softmax(-inf).
+            # Keep at least one token valid per row to avoid NaNs in attention pooling.
+            empty_rows = ~mask.any(dim=1)
+            if empty_rows.any():
+                fallback_idx = input_ids.size(1) - 1
+                mask = mask.clone()
+                mask[empty_rows, fallback_idx] = True
         return mask
 
     def _pool_tokens(self, hidden_cond: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
@@ -325,6 +334,12 @@ class SemanticResidualRouterGuidanceNet(nn.Module):
             mask &= (input_ids != self.pad_id)
         if self.bos_id is not None:
             mask &= (input_ids != self.bos_id)
+        if not mask.all():
+            empty_rows = ~mask.any(dim=1)
+            if empty_rows.any():
+                fallback_idx = input_ids.size(1) - 1
+                mask = mask.clone()
+                mask[empty_rows, fallback_idx] = True
         return mask
 
     def _pool_tokens(self, hidden_cond: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
@@ -339,6 +354,19 @@ class SemanticResidualRouterGuidanceNet(nn.Module):
         scores = scores.masked_fill(~mask, float("-inf"))
         weights = torch.softmax(scores, dim=1)
         return (hidden_cond * weights.unsqueeze(-1)).sum(dim=1)
+
+    @staticmethod
+    def _match_reference_scale(
+            delta: torch.Tensor,
+            reference_delta: torch.Tensor,
+            max_ratio: float = 5.0,
+    ) -> torch.Tensor:
+        delta_rms = delta.float().pow(2).mean(dim=(1, 2, 3), keepdim=True).sqrt().clamp_min(1e-6)
+        reference_rms = (
+            reference_delta.float().pow(2).mean(dim=(1, 2, 3), keepdim=True).sqrt().detach().clamp_min(1e-6)
+        )
+        scale = (reference_rms / delta_rms).clamp(min=0.0, max=max_ratio)
+        return delta * scale.to(delta.dtype)
 
     def _time_embed(self, unet, sample, timestep, timestep_cond=None,
                     encoder_hidden_states=None, added_cond_kwargs=None):
@@ -949,6 +977,10 @@ class StableDiffusion(BaseModel):
                                     encoder_hidden_states=degraded_hidden_states,
                                 )
                             basis_delta = noise_pred_text - noise_pred_degraded
+                            basis_delta = self.guidance_net._match_reference_scale(
+                                delta=basis_delta,
+                                reference_delta=cfg_delta,
+                            )
                             if detach_main_path:
                                 basis_delta = basis_delta.detach()
                             alpha = alphas[:, group_idx].view(batch_size, 1, 1, 1)
