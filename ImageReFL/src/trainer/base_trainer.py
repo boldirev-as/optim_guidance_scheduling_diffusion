@@ -144,6 +144,7 @@ class BaseTrainer:
             *self.train_loss_names,
             "grad_norm",
             "guidance_grad_norm",
+            "guidance_grad_finite",
             writer=self.writer,
         )
         self.evaluation_metrics = MetricTracker(
@@ -460,10 +461,16 @@ class BaseTrainer:
             accumulation_step += 1
             if accumulation_step % self.cfg_trainer.accumulation_steps == 0:
                 self.scaler.unscale_(self.optimizer)  # add
-                self._clip_grad_norm()
-                # self.optimizer.step()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                grads_are_finite = self._guidance_grads_are_finite()
+                self.train_metrics.update("guidance_grad_finite", float(grads_are_finite))
+                if grads_are_finite:
+                    self._clip_grad_norm()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.logger.warning("Non-finite guidance gradients detected. Skipping optimizer step.")
+                    if self.scaler.is_enabled():
+                        self.scaler.update()
                 if self.lr_scheduler is not None:
                     self.lr_scheduler.step()
 
@@ -706,6 +713,13 @@ class BaseTrainer:
             norm_type,
         )
         return total_norm.item() if len(parameters) > 0 else 0.0
+
+    @torch.no_grad()
+    def _guidance_grads_are_finite(self) -> bool:
+        parameters = [p for p in self.model.guidance_net.parameters() if p.grad is not None]
+        if not parameters:
+            return True
+        return all(torch.isfinite(p.grad).all().item() for p in parameters)
 
     def _progress(self, batch_idx):
         """

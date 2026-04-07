@@ -116,7 +116,8 @@ def main(config):
     # trainable_params = filter(lambda p: p.requires_grad, model.guidance_net.parameters())
     optimizer = instantiate(config.optimizer, params=model.guidance_net.parameters())
     lr_scheduler = instantiate(config.lr_scheduler, optimizer=optimizer)
-    scaler = GradScaler()
+    use_grad_scaler = bool(config.trainer.get("use_grad_scaler", False))
+    scaler = GradScaler(enabled=use_grad_scaler)
 
     epoch_len = config.trainer.get("epoch_len")
 
