@@ -325,7 +325,11 @@ class SemanticResidualRouterGuidanceNet(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, self.num_groups),
         )
-        init.zeros_(self.mlp[-1].weight)
+        # A fully zeroed head keeps alpha=0 exactly, but it also blocks all
+        # first-step gradients to the trunk because dlogits/dhidden = W_last^T = 0.
+        # Start from a tiny non-zero head so the router stays near the base CFG
+        # while still letting the full MLP learn from the first update.
+        init.normal_(self.mlp[-1].weight, mean=0.0, std=1e-3)
         init.zeros_(self.mlp[-1].bias)
 
     def _make_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
